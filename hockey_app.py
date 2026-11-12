@@ -188,6 +188,14 @@ if uploaded_file is not None:
     df['Phone'] = df[col_phone].fillna('').astype(str).str.strip() if col_phone else ''
     df['Days'] = df[col_days].fillna('').astype(str).str.strip() if col_days else ''
 
+    # --- DAY-SPECIFIC POSITION OVERRIDE ---
+    # Gary Fera regularly plays Defense on Wednesdays
+    if "wednesday" in selected_sheet.strip().lower():
+        gary_mask = df['Full Name'].apply(clean_name_key) == clean_name_key("Gary Fera")
+        if gary_mask.any():
+            df.loc[gary_mask, '1st Choice'] = 'D'
+            df.loc[gary_mask, '2nd Choice'] = 'F'
+
     # --- MASTER LOOKUP (BIRTHDAYS) ---
     bday_col_name = 'B-day'
     birthday_source = df
