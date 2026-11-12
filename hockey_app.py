@@ -16,15 +16,30 @@ def load_excel_data(uploaded_file):
         return None, str(e)
 
 # --- 3. HELPER FUNCTIONS ---
-def snake_draft(players):
+def balanced_snake_draft(players, pre_count_a=0, pre_count_b=0):
+    """
+    Distributes players in balanced skill pairs while accounting for any
+    pre-assigned rival players already placed on Red (A) or White (B).
+    Guarantees even positional counts whenever an even total is available.
+    """
     players = players.reset_index(drop=True)
     team_a_list, team_b_list = [], []
+    next_to_b = True
+
     for i in range(len(players)):
         player = players.iloc[i]
-        if i % 4 == 0 or i % 4 == 3:
-            team_a_list.append(player)
+        if i % 2 == 0:
+            if len(team_a_list) + pre_count_a <= len(team_b_list) + pre_count_b:
+                team_a_list.append(player)
+                next_to_b = True
+            else:
+                team_b_list.append(player)
+                next_to_b = False
         else:
-            team_b_list.append(player)
+            if next_to_b:
+                team_b_list.append(player)
+            else:
+                team_a_list.append(player)
 
     cols = players.columns
     df_a = pd.DataFrame(team_a_list, columns=cols) if team_a_list else pd.DataFrame(columns=cols)
@@ -110,6 +125,110 @@ def get_birthday_message(players_df, bday_col):
     noun = "birthday" if len(celebrants) == 1 else "birthdays"
     return f"🎉 Congratulations to {names_str} who {verb} celebrating their {noun} this week!\n\n", celebrants
 
+def build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False):
+    """Runs rival separation + balanced snake draft and returns teams, cuts, and notes."""
+    pd_work = pool_d.copy()
+    pf_work = pool_f.copy()
+    pre_a, pre_b, rival_logs = [], [], []
+    TARGET_D = 8
+    MAX_PLAYERS = 30
+
+    def extract(nm, pd_p, pf_p):
+        key = clean_name_key(nm)
+        pd_p['K'] = pd_p['Full Name'].apply(clean_name_key)
+        pf_p['K'] = pf_p['Full Name'].apply(clean_name_key)
+        md, mf = pd_p[pd_p['K'] == key], pf_p[pf_p['K'] == key]
+        if not md.empty:
+            row = md.iloc[0].copy()
+            row['Assigned_Pos'] = 'D'
+            return row, pd_p.drop(md.index), pf_p
+        if not mf.empty:
+            row = mf.iloc[0].copy()
+            row['Assigned_Pos'] = 'F'
+            return row, pd_p, pf_p.drop(mf.index)
+        return None, pd_p, pf_p
+
+    def return_to_pool(obj, pd_p, pf_p):
+        if obj is not None:
+            if obj['Assigned_Pos'] == 'D':
+                pd_p = pd.concat([pd_p, obj.to_frame().T])
+            else:
+                pf_p = pd.concat([pf_p, obj.to_frame().T])
+        return pd_p, pf_p
+
+    rivals = [("Mike Tonietto", "Jamie Devin"), ("Mark Hicks", "Gary Fera")]
+    pidx = 0
+    for p1, p2 in rivals:
+        o1, pd_work, pf_work = extract(p1, pd_work, pf_work)
+        o2, pd_work, pf_work = extract(p2, pd_work, pf_work)
+
+        if o1 is not None and o2 is not None:
+            is_hicks_fera = {clean_name_key(p1), clean_name_key(p2)} == {clean_name_key("Mark Hicks"), clean_name_key("Gary Fera")}
+            gary_obj = o1 if clean_name_key(o1['Full Name']) == clean_name_key("Gary Fera") else o2
+
+            # Wednesday exception: only allowed when Gary is playing Defence AND separation caused a balance issue
+            if is_wednesday and is_hicks_fera and gary_obj['Assigned_Pos'] == 'D' and allow_wed_d_pair:
+                pd_work, pf_work = return_to_pool(o1, pd_work, pf_work)
+                pd_work, pf_work = return_to_pool(o2, pd_work, pf_work)
+                rival_logs.append("Wednesday Exception: Allowed Mark Hicks & Gary Fera (on Defence) into open draft for team balance")
+            else:
+                srt = sorted([o1, o2], key=lambda x: x['Score'], reverse=True)
+                if pidx % 2 == 0:
+                    pre_a.append(srt[0])
+                    pre_b.append(srt[1])
+                else:
+                    pre_b.append(srt[0])
+                    pre_a.append(srt[1])
+                rival_logs.append(f"Separated {p1} & {p2}")
+                pidx += 1
+        else:
+            pd_work, pf_work = return_to_pool(o1, pd_work, pf_work)
+            pd_work, pf_work = return_to_pool(o2, pd_work, pf_work)
+
+    for df_x in [pd_work, pf_work]:
+        if 'K' in df_x.columns:
+            del df_x['K']
+
+    pd_work = pd_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
+    pf_work = pf_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
+
+    pre_d_a = len([p for p in pre_a if p['Assigned_Pos'] == 'D'])
+    pre_d_b = len([p for p in pre_b if p['Assigned_Pos'] == 'D'])
+    pre_f_a = len([p for p in pre_a if p['Assigned_Pos'] == 'F'])
+    pre_f_b = len([p for p in pre_b if p['Assigned_Pos'] == 'F'])
+
+    total_pre_d = pre_d_a + pre_d_b
+    total_pre_f = pre_f_a + pre_f_b
+
+    rem_d = max(0, min(TARGET_D, len(pd_work) + total_pre_d) - total_pre_d)
+    sel_d = pd_work.head(rem_d).copy()
+    cuts_d = pd_work.iloc[len(sel_d):].copy()
+
+    max_f = MAX_PLAYERS - (len(sel_d) + total_pre_d)
+    rem_f = max(0, max_f - total_pre_f)
+    sel_f = pf_work.head(rem_f).copy()
+    cuts_f = pf_work.iloc[len(sel_f):].copy()
+
+    sel_d['Position'] = 'D'
+    sel_f['Position'] = 'F'
+    for p in pre_a + pre_b:
+        p['Position'] = p['Assigned_Pos']
+
+    da, db = balanced_snake_draft(sel_d, pre_d_a, pre_d_b)
+    fa, fb = balanced_snake_draft(sel_f, pre_f_a, pre_f_b)
+
+    cols = ['Full Name', 'Position', 'Score', 'Email', 'Phone', 'Notes']
+    def to_df(lst):
+        return pd.DataFrame(lst) if lst else pd.DataFrame(columns=cols)
+
+    ta = pd.concat([to_df(pre_a), da, fa], ignore_index=True)
+    tb = pd.concat([to_df(pre_b), db, fb], ignore_index=True)
+
+    ta = ta.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
+    tb = tb.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
+
+    return ta, tb, cuts_d, cuts_f, rival_logs
+
 # --- 4. MAIN APP ---
 st.title("🏒 Hockey Team Generator")
 st.write("Upload your Excel player sheet.")
@@ -137,6 +256,7 @@ if uploaded_file is not None:
 
     selected_sheet = st.selectbox("Select Roster:", valid_sheets)
     df = all_sheets[selected_sheet].copy()
+    is_wednesday = "wednesday" in selected_sheet.strip().lower()
 
     # --- NORMALIZE COLUMNS ---
     col_name = find_col_case_insensitive(df, ['name', 'full name', 'fullname'])
@@ -190,7 +310,7 @@ if uploaded_file is not None:
 
     # --- DAY-SPECIFIC POSITION OVERRIDE ---
     # Gary Fera regularly plays Defense on Wednesdays
-    if "wednesday" in selected_sheet.strip().lower():
+    if is_wednesday:
         gary_mask = df['Full Name'].apply(clean_name_key) == clean_name_key("Gary Fera")
         if gary_mask.any():
             df.loc[gary_mask, '1st Choice'] = 'D'
@@ -251,25 +371,15 @@ if uploaded_file is not None:
         st.error("No players marked 'Y' or 'Yes'.")
         st.stop()
 
-    # --- TARGETS ---
+    # --- TARGETS: ALWAYS BALANCE DEFENSE TO 4 PER TEAM (8 TOTAL), REMAINDER AS FORWARDS ---
     total = len(available)
-    BASE_F, BASE_D, MIN_D_CRITICAL = 12, 8, 6
-
-    if total <= 20:
-        target_f, target_d = BASE_F, BASE_D
-    else:
-        ex = total - 20
-        add_f = min(ex, 6)
-        ex -= add_f
-        target_f, target_d = BASE_F + add_f, BASE_D + min(ex, 4)
-
-    st.info(f"**Strategy ({selected_sheet}):** {total} players -> {target_f} F / {target_d} D")
+    TARGET_D = 8        # 4 Defensemen per team
 
     missing_pos = available[~available['1st Choice'].isin(['F', 'D'])]
     if not missing_pos.empty:
         st.warning(
             f"⚠️ Missing 1st Choice position for: **{', '.join(missing_pos['Full Name'])}** "
-            "(check if they are listed on the Master sheet)."
+            "(assigned as Forward; check Master sheet if needed)."
         )
 
     # --- BIRTHDAY CHECK ---
@@ -298,120 +408,59 @@ if uploaded_file is not None:
 
     pool_d = available[available['1st Choice'] == 'D'].copy()
     pool_f = available[available['1st Choice'] == 'F'].copy()
+    pool_other = available[~available['1st Choice'].isin(['D', 'F'])].copy()
 
-    # --- BALANCER LOGIC ---
-    if len(pool_d) < MIN_D_CRITICAL:
-        needed = MIN_D_CRITICAL - len(pool_d)
+    # --- POSITIONAL BALANCER LOGIC (Target 4 D per team = 8 D total) ---
+    if len(pool_d) < TARGET_D:
+        needed = TARGET_D - len(pool_d)
         candidates = pool_f[pool_f['2nd Choice'] == 'D']
         if not candidates.empty:
             conv = candidates.head(needed)
             pool_d = pd.concat([pool_d, conv])
             pool_f = pool_f.drop(conv.index)
-            st.warning(f"⚠️ Critical D Shortage (<6): Moved {len(conv)} F -> D: **{', '.join(conv['Full Name'])}**")
+            st.info(f"Balanced Defense (4 per team): Moved {len(conv)} F -> D: **{', '.join(conv['Full Name'])}**")
 
-    if len(pool_f) < target_f:
-        needed = target_f - len(pool_f)
-        surplus_d = len(pool_d) - MIN_D_CRITICAL
-        if surplus_d > 0:
-            can_take = min(needed, surplus_d)
-            candidates = pool_d[pool_d['2nd Choice'] == 'F']
-            if not candidates.empty:
-                conv = candidates.head(can_take)
-                pool_f = pd.concat([pool_f, conv])
-                pool_d = pool_d.drop(conv.index)
-                st.info(f"Balanced Forwards: Moved {len(conv)} D -> F: **{', '.join(conv['Full Name'])}**")
-
-    if len(pool_d) < target_d:
-        d_shortage = target_d - len(pool_d)
-        surplus_f = len(pool_f) - target_f
-        if surplus_f > 0:
-            amount_to_move = min(d_shortage, surplus_f)
-            candidates = pool_f[pool_f['2nd Choice'] == 'D']
-            if not candidates.empty:
-                conv = candidates.head(amount_to_move)
-                pool_d = pd.concat([pool_d, conv])
-                pool_f = pool_f.drop(conv.index)
-                st.info(f"Balanced Defense: Moved {len(conv)} F -> D: **{', '.join(conv['Full Name'])}**")
-
-    # --- RIVALS ---
-    pre_a, pre_b, rival_logs = [], [], []
-
-    def extract(nm, pd_pool, pf_pool):
-        key = clean_name_key(nm)
-        pd_pool['K'] = pd_pool['Full Name'].apply(clean_name_key)
-        pf_pool['K'] = pf_pool['Full Name'].apply(clean_name_key)
-        md, mf = pd_pool[pd_pool['K'] == key], pf_pool[pf_pool['K'] == key]
-        if not md.empty:
-            row = md.iloc[0].copy()
-            row['Assigned_Pos'] = 'D'
-            return row, pd_pool.drop(md.index), pf_pool
-        if not mf.empty:
-            row = mf.iloc[0].copy()
-            row['Assigned_Pos'] = 'F'
-            return row, pd_pool, pf_pool.drop(mf.index)
-        return None, pd_pool, pf_pool
-
-    rivals = [("Mike Tonietto", "Jamie Devin"), ("Mark Hicks", "Gary Fera")]
-    pidx = 0
-    for p1, p2 in rivals:
-        o1, pool_d, pool_f = extract(p1, pool_d, pool_f)
-        o2, pool_d, pool_f = extract(p2, pool_d, pool_f)
-        if o1 is not None and o2 is not None:
-            srt = sorted([o1, o2], key=lambda x: x['Score'], reverse=True)
-            if pidx % 2 == 0:
-                pre_a.append(srt[0])
-                pre_b.append(srt[1])
-            else:
-                pre_b.append(srt[0])
-                pre_a.append(srt[1])
-            rival_logs.append(f"Separated {p1} & {p2}")
-            pidx += 1
+    if len(pool_d) > TARGET_D:
+        excess = len(pool_d) - TARGET_D
+        candidates_2nd = pool_d[pool_d['2nd Choice'] == 'F']
+        if len(candidates_2nd) >= excess:
+            conv = candidates_2nd.head(excess)
         else:
-            if o1 is not None:
-                if o1['Assigned_Pos'] == 'D':
-                    pool_d = pd.concat([pool_d, o1.to_frame().T])
-                else:
-                    pool_f = pd.concat([pool_f, o1.to_frame().T])
-            if o2 is not None:
-                if o2['Assigned_Pos'] == 'D':
-                    pool_d = pd.concat([pool_d, o2.to_frame().T])
-                else:
-                    pool_f = pd.concat([pool_f, o2.to_frame().T])
+            rem = excess - len(candidates_2nd)
+            others = pool_d.drop(candidates_2nd.index).tail(rem)
+            conv = pd.concat([candidates_2nd, others])
+        pool_f = pd.concat([pool_f, conv])
+        pool_d = pool_d.drop(conv.index)
+        st.info(f"Balanced Defense (capped at 4 per team): Moved {len(conv)} D -> F: **{', '.join(conv['Full Name'])}**")
 
-    # --- DRAFT ---
-    for df_x in [pool_d, pool_f]:
-        if 'K' in df_x.columns:
-            del df_x['K']
+    elif len(pool_d) % 2 == 1 and len(pool_d) > 4:
+        candidates_2nd = pool_d[pool_d['2nd Choice'] == 'F']
+        conv = candidates_2nd.head(1) if not candidates_2nd.empty else pool_d.tail(1)
+        pool_f = pd.concat([pool_f, conv])
+        pool_d = pool_d.drop(conv.index)
+        st.info(f"Evened Defense across teams ({len(pool_d)//2} per team): Moved 1 D -> F: **{', '.join(conv['Full Name'])}**")
 
-    pool_d = pool_d.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
-    pool_f = pool_f.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
+    if not pool_other.empty:
+        pool_f = pd.concat([pool_f, pool_other])
 
-    pd_cnt = len([p for p in pre_a + pre_b if p['Assigned_Pos'] == 'D'])
-    pf_cnt = len([p for p in pre_a + pre_b if p['Assigned_Pos'] == 'F'])
+    st.info(
+        f"**Strategy ({selected_sheet}):** {total} players -> "
+        f"**{len(pool_d)} Defense** ({len(pool_d)//2} per team) & **{len(pool_f)} Forwards**"
+    )
 
-    sel_d = pool_d.head(max(0, target_d - pd_cnt)).copy()
-    sel_f = pool_f.head(max(0, target_f - pf_cnt)).copy()
-    cuts_d = pool_d.iloc[len(sel_d):].copy()
-    cuts_f = pool_f.iloc[len(sel_f):].copy()
+    # --- BUILD ROSTERS (Try strict separation first; apply Wednesday D exception only if needed) ---
+    ta, tb, cuts_d, cuts_f, rival_logs = build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False)
 
-    sel_d['Position'] = 'D'
-    sel_f['Position'] = 'F'
-    for p in pre_a + pre_b:
-        p['Position'] = p['Assigned_Pos']
-
-    da, db = snake_draft(sel_d)
-    fa, fb = snake_draft(sel_f)
-
-    # --- COMBINE ---
-    cols = ['Full Name', 'Position', 'Score', 'Email', 'Phone', 'Notes']
-    def to_df(lst):
-        return pd.DataFrame(lst) if lst else pd.DataFrame(columns=cols)
-
-    ta = pd.concat([to_df(pre_a), da, fa], ignore_index=True)
-    tb = pd.concat([to_df(pre_b), db, fb], ignore_index=True)
-
-    ta = ta.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
-    tb = tb.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
+    if is_wednesday:
+        common_cnt = min(len(ta), len(tb))
+        score_gap = abs(get_top_n_score(ta, common_cnt) - get_top_n_score(tb, common_cnt))
+        if score_gap > 1.5:
+            ta_alt, tb_alt, cuts_d_alt, cuts_f_alt, rival_logs_alt = build_rosters(
+                pool_d, pool_f, is_wednesday, allow_wed_d_pair=True
+            )
+            alt_gap = abs(get_top_n_score(ta_alt, common_cnt) - get_top_n_score(tb_alt, common_cnt))
+            if alt_gap < score_gap:
+                ta, tb, cuts_d, cuts_f, rival_logs = ta_alt, tb_alt, cuts_d_alt, cuts_f_alt, rival_logs_alt
 
     # --- UI ---
     if st.button("Shuffle"):
