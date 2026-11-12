@@ -37,7 +37,7 @@ def true_snake_draft(players, pre_count_a=0, pre_count_b=0):
             pick_a = not pick_a
 
         if pick_a:
-            team_a_list.append(players.iloc[i])
+            team_a_list.append(player := players.iloc[i])
         else:
             team_b_list.append(players.iloc[i])
 
@@ -257,6 +257,7 @@ if uploaded_file is not None:
 
     selected_sheet = st.selectbox("Select Roster:", valid_sheets)
     df = all_sheets[selected_sheet].copy()
+    is_monday = "monday" in selected_sheet.strip().lower()
     is_wednesday = "wednesday" in selected_sheet.strip().lower()
 
     # --- NORMALIZE COLUMNS ---
@@ -414,7 +415,14 @@ if uploaded_file is not None:
     # --- POSITIONAL BALANCER LOGIC (Target 4 D per team = 8 D total) ---
     if len(pool_d) < TARGET_D:
         needed = TARGET_D - len(pool_d)
-        candidates = pool_f[pool_f['2nd Choice'] == 'D']
+        candidates = pool_f[pool_f['2nd Choice'] == 'D'].copy()
+        # On Mondays, keep Gary Fera at Forward unless all other F->D options are exhausted
+        if is_monday and not candidates.empty:
+            candidates['Is_Gary'] = candidates['Full Name'].apply(clean_name_key) == clean_name_key("Gary Fera")
+            candidates = candidates.sort_values(
+                by=['Is_Gary', 'Status_Rank', 'Score'], ascending=[True, True, False], kind='mergesort'
+            ).drop(columns=['Is_Gary'])
+
         if not candidates.empty:
             conv = candidates.head(needed)
             pool_d = pd.concat([pool_d, conv])
