@@ -6,6 +6,9 @@ from datetime import datetime, timedelta
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Hockey Team Balancer")
 
+if "shuffle_seed" not in st.session_state:
+    st.session_state.shuffle_seed = 0
+
 # --- 2. CACHED DATA LOADER ---
 @st.cache_data
 def load_excel_data(uploaded_file):
@@ -16,30 +19,27 @@ def load_excel_data(uploaded_file):
         return None, str(e)
 
 # --- 3. HELPER FUNCTIONS ---
-def balanced_snake_draft(players, pre_count_a=0, pre_count_b=0):
+def true_snake_draft(players, pre_count_a=0, pre_count_b=0):
     """
-    Distributes players in balanced skill pairs while accounting for any
-    pre-assigned rival players already placed on Red (A) or White (B).
-    Guarantees even positional counts whenever an even total is available.
+    True snake draft (A, B, B, A, A, B, B, A) adjusted for any pre-assigned players
+    at the same position. Ensures top-rated and weakest-rated players at each
+    position are separated onto opposite teams rather than stacked together.
     """
     players = players.reset_index(drop=True)
-    team_a_list, team_b_list = [], []
-    next_to_b = True
+    mirror = pre_count_b > pre_count_a
+    start_slot = pre_count_a + pre_count_b
 
+    team_a_list, team_b_list = [], []
     for i in range(len(players)):
-        player = players.iloc[i]
-        if i % 2 == 0:
-            if len(team_a_list) + pre_count_a <= len(team_b_list) + pre_count_b:
-                team_a_list.append(player)
-                next_to_b = True
-            else:
-                team_b_list.append(player)
-                next_to_b = False
+        slot = start_slot + i
+        pick_a = (slot % 4 == 0 or slot % 4 == 3)
+        if mirror:
+            pick_a = not pick_a
+
+        if pick_a:
+            team_a_list.append(players.iloc[i])
         else:
-            if next_to_b:
-                team_b_list.append(player)
-            else:
-                team_a_list.append(player)
+            team_b_list.append(players.iloc[i])
 
     cols = players.columns
     df_a = pd.DataFrame(team_a_list, columns=cols) if team_a_list else pd.DataFrame(columns=cols)
@@ -126,7 +126,7 @@ def get_birthday_message(players_df, bday_col):
     return f"🎉 Congratulations to {names_str} who {verb} celebrating their {noun} this week!\n\n", celebrants
 
 def build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False):
-    """Runs rival separation + balanced snake draft and returns teams, cuts, and notes."""
+    """Runs rival separation + true snake draft and returns teams, cuts, and notes."""
     pd_work = pool_d.copy()
     pf_work = pool_f.copy()
     pre_a, pre_b, rival_logs = [], [], []
@@ -189,8 +189,9 @@ def build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False):
         if 'K' in df_x.columns:
             del df_x['K']
 
-    pd_work = pd_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
-    pf_work = pf_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
+    # Preserve tie-break shuffle order while sorting by Reg/Spare then Score
+    pd_work = pd_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False], kind='mergesort')
+    pf_work = pf_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False], kind='mergesort')
 
     pre_d_a = len([p for p in pre_a if p['Assigned_Pos'] == 'D'])
     pre_d_b = len([p for p in pre_b if p['Assigned_Pos'] == 'D'])
@@ -214,8 +215,8 @@ def build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False):
     for p in pre_a + pre_b:
         p['Position'] = p['Assigned_Pos']
 
-    da, db = balanced_snake_draft(sel_d, pre_d_a, pre_d_b)
-    fa, fb = balanced_snake_draft(sel_f, pre_f_a, pre_f_b)
+    da, db = true_snake_draft(sel_d, pre_d_a, pre_d_b)
+    fa, fb = true_snake_draft(sel_f, pre_f_a, pre_f_b)
 
     cols = ['Full Name', 'Position', 'Score', 'Email', 'Phone', 'Notes']
     def to_df(lst):
@@ -401,10 +402,10 @@ if uploaded_file is not None:
             for _, nrow in noted_players.iterrows():
                 st.write(f"- **{nrow['Full Name']}**: {nrow['Notes']}")
 
-    # --- SORT & POOLS ---
-    available = available.sample(frac=1).reset_index(drop=True)
+    # --- SHUFFLE TIE-BREAKS & SORT POOLS ---
+    available = available.sample(frac=1, random_state=st.session_state.shuffle_seed).reset_index(drop=True)
     available['Status_Rank'] = available['Reg / Spare'].apply(lambda x: 0 if x == 'R' else 1)
-    available = available.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
+    available = available.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False], kind='mergesort')
 
     pool_d = available[available['1st Choice'] == 'D'].copy()
     pool_f = available[available['1st Choice'] == 'F'].copy()
@@ -448,7 +449,7 @@ if uploaded_file is not None:
         f"**{len(pool_d)} Defense** ({len(pool_d)//2} per team) & **{len(pool_f)} Forwards**"
     )
 
-    # --- BUILD ROSTERS (Try strict separation first; apply Wednesday D exception only if needed) ---
+    # --- BUILD ROSTERS ---
     ta, tb, cuts_d, cuts_f, rival_logs = build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False)
 
     if is_wednesday:
@@ -463,8 +464,10 @@ if uploaded_file is not None:
                 ta, tb, cuts_d, cuts_f, rival_logs = ta_alt, tb_alt, cuts_d_alt, cuts_f_alt, rival_logs_alt
 
     # --- UI ---
-    if st.button("Shuffle"):
+    if st.button("🔀 Shuffle Teams Again"):
+        st.session_state.shuffle_seed += 1
         st.rerun()
+
     if rival_logs:
         st.divider()
         for r in rival_logs:
