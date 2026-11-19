@@ -18,7 +18,7 @@ st.set_page_config(page_title="Hockey Team Balancer", layout="wide")
 
 # PASTE YOUR GOOGLE SHEET URL BETWEEN THE QUOTES BELOW:
 DEFAULT_GOOGLE_SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/11bgbSoRAAL79hYniKkyI4w0wMOAgSSFe/edit?usp=sharing&ouid=114162045734133679348&rtpof=true&sd=true"
+    "https://docs.google.com/spreadsheets/d/1zUnLUXHHjZpkA-g_3a3gxIn8I0N0ujuvSe3N3BpdPb8/edit?usp=sharing"
 )
 
 if "shuffle_seed" not in st.session_state:
@@ -89,11 +89,13 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
 
     try:
         spreadsheet = client.open_by_key(sid)
+        sheet_title = spreadsheet.title
         summary_map = {}
         for _, r in summary_df.iterrows():
             summary_map[r["Key"]] = r
 
         updated_tabs = []
+        checked_info = []
         for day in valid_sheets:
             try:
                 ws = spreadsheet.worksheet(day)
@@ -101,12 +103,24 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
                 continue
 
             all_vals = ws.get_all_values()
-            if len(all_vals) < 3:
+            if len(all_vals) < 2:
                 continue
 
-            # Row 2 (index 1) is the header row
-            headers = all_vals[1]
-            norm_h = ["".join(str(h).lower().split()) for h in headers]
+            # Auto-detect header row (usually row 2 / index 1, or row 1 / index 0)
+            hdr_idx = None
+            norm_h = []
+            for candidate_r in range(min(5, len(all_vals))):
+                test_h = [
+                    "".join(str(h).lower().split())
+                    for h in all_vals[candidate_r]
+                ]
+                if "availability" in test_h or "avail" in test_h:
+                    hdr_idx = candidate_r
+                    norm_h = test_h
+                    break
+
+            if hdr_idx is None:
+                continue
 
             def find_idx(targets):
                 for t in targets:
@@ -128,16 +142,17 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
                 continue
 
             cells_to_update = []
-            for r_idx in range(2, len(all_vals)):
+            matched_rows = 0
+            for r_idx in range(hdr_idx + 1, len(all_vals)):
                 row_vals = all_vals[r_idx]
-                full_nm = ""
+                keys_to_try = []
+
                 if idx_name is not None and idx_name < len(row_vals):
-                    full_nm = str(row_vals[idx_name]).strip()
-                if (
-                    not full_nm
-                    and idx_first is not None
-                    and idx_last is not None
-                ):
+                    nm_val = str(row_vals[idx_name]).strip()
+                    if nm_val:
+                        keys_to_try.append(clean_name_key(nm_val))
+
+                if idx_first is not None and idx_last is not None:
                     fp = (
                         str(row_vals[idx_first]).strip()
                         if idx_first < len(row_vals)
@@ -148,16 +163,18 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
                         if idx_last < len(row_vals)
                         else ""
                     )
-                    full_nm = f"{fp} {lp}".strip()
+                    combo = f"{fp} {lp}".strip()
+                    if combo:
+                        keys_to_try.append(clean_name_key(combo))
 
-                if not full_nm:
+                matched_key = next(
+                    (k for k in keys_to_try if k in summary_map), None
+                )
+                if not matched_key:
                     continue
 
-                k = clean_name_key(full_nm)
-                if k not in summary_map:
-                    continue
-
-                s_row = summary_map[k]
+                matched_rows += 1
+                s_row = summary_map[matched_key]
                 sheet_row_num = r_idx + 1
 
                 new_avail = "Y" if bool(s_row[day]) else "N"
@@ -212,13 +229,25 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
                             )
                         )
 
+            checked_info.append(f"{day}: {matched_rows} rows")
             if cells_to_update:
-                ws.update_cells(cells_to_update)
-                updated_tabs.append(f"{day} ({len(cells_to_update)})")
+                ws.update_cells(
+                    cells_to_update, value_input_option="USER_ENTERED"
+                )
+                updated_tabs.append(
+                    f"{day} ({len(cells_to_update)} cells)"
+                )
 
         if updated_tabs:
-            return True, f"Saved updates to: {', '.join(updated_tabs)}"
-        return True, "Google Sheet is already up to date!"
+            return (
+                True,
+                f"Saved to '{sheet_title}': {', '.join(updated_tabs)}",
+            )
+        detail = ", ".join(checked_info) if checked_info else "no matching tabs"
+        return (
+            True,
+            f"No differences found in '{sheet_title}' (checked {detail}).",
+        )
     except Exception as e:
         return False, f"Error saving to Google Sheet: {e}"
 
