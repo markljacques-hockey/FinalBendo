@@ -10,7 +10,7 @@ st.set_page_config(page_title="Hockey Team Balancer", layout="wide")
 
 # PASTE YOUR GOOGLE SHEET URL BETWEEN THE QUOTES BELOW:
 DEFAULT_GOOGLE_SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/11bgbSoRAAL79hYniKkyI4w0wMOAgSSFe/edit?usp=sharing&ouid=114162045734133679348&rtpof=true&sd=true"
+    "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE/edit"
 )
 
 if "shuffle_seed" not in st.session_state:
@@ -530,3 +530,398 @@ all_sheets, error_msg = load_google_sheet_data(sheet_url.strip())
 sig = f"gsheet_{sheet_url.strip()}"
 
 if error_msg:
+    st.error(f"❌ {error_msg}")
+    st.stop()
+
+if all_sheets is not None:
+    names = list(all_sheets.keys())
+    master_name = next(
+        (s for s in names if "master" in s.lower()), None
+    )
+    blocked = [
+        "master", "instructions", "instruction", "reference", "setup"
+    ]
+    valid_sheets = [
+        s
+        for s in names
+        if not any(b in s.strip().lower() for b in blocked)
+    ]
+
+    if not valid_sheets:
+        st.error("No valid game sheets found.")
+        st.stop()
+
+    if (
+        st.session_state.get("sig") != sig
+        or "summary_df" not in st.session_state
+    ):
+        st.session_state.summary_df = build_summary_table(
+            all_sheets, valid_sheets, master_name
+        )
+        st.session_state.sig = sig
+
+    tab_sum, tab_gen = st.tabs(
+        ["📋 Weekly Availability Summary", "🏒 Generate Day Lineups"]
+    )
+
+    with tab_sum:
+        st.subheader("Master Roster & Game-Day Availability")
+        st.write(
+            "Check or uncheck who is playing on each day below. "
+            "Changes update the **Generate Day Lineups** tab."
+        )
+
+        m_cols = st.columns(len(valid_sheets))
+        for idx, day in enumerate(valid_sheets):
+            cnt = int(st.session_state.summary_df[day].sum())
+            m_cols[idx].metric(label=f"{day} Players In", value=cnt)
+
+        disp_cols = (
+            ["Full Name", "Reg / Spare", "Days"]
+            + valid_sheets
+            + ["1st Choice", "2nd Choice", "Score", "Notes"]
+        )
+
+        cfg = {
+            "Full Name": st.column_config.TextColumn(
+                "Player Name", disabled=True
+            ),
+            "Reg / Spare": st.column_config.SelectboxColumn(
+                "Reg / Spare", options=["R", "S"], width="small"
+            ),
+            "Days": st.column_config.SelectboxColumn(
+                "Days",
+                help="M = Monday, MW = Mon & Wed, W = Wednesday",
+                options=["M", "MW", "W", ""],
+                width="small",
+            ),
+            "1st Choice": st.column_config.SelectboxColumn(
+                "1st Choice", options=["F", "D", ""], width="small"
+            ),
+            "2nd Choice": st.column_config.SelectboxColumn(
+                "2nd Choice",
+                options=["F", "D", "G", ""],
+                width="small",
+            ),
+            "Score": st.column_config.NumberColumn(
+                "Score",
+                min_value=0.0,
+                max_value=10.0,
+                step=0.5,
+                width="small",
+            ),
+            "Notes": st.column_config.TextColumn("Notes"),
+        }
+        for day in valid_sheets:
+            cfg[day] = st.column_config.CheckboxColumn(
+                day, default=False, width="small"
+            )
+
+        edited = st.data_editor(
+            st.session_state.summary_df[disp_cols],
+            column_config=cfg,
+            hide_index=True,
+            use_container_width=True,
+            height=600,
+            key="attendance_editor",
+        )
+
+        for col in disp_cols:
+            st.session_state.summary_df[col] = edited[col]
+
+        if st.button("↩️ Reset Checkboxes to Sheet Defaults"):
+            st.session_state.summary_df = build_summary_table(
+                all_sheets, valid_sheets, master_name
+            )
+            st.rerun()
+
+    with tab_gen:
+        sel_day = st.selectbox(
+            "Select Game Day to Generate Lineups:", valid_sheets
+        )
+        is_mon = "monday" in sel_day.strip().lower()
+        is_wed = "wednesday" in sel_day.strip().lower()
+
+        w_df = st.session_state.summary_df.copy()
+        w_df["1st Choice"] = (
+            w_df["1st Choice"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        w_df["2nd Choice"] = (
+            w_df["2nd Choice"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        w_df["Reg / Spare"] = (
+            w_df["Reg / Spare"]
+            .fillna("S")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        w_df["Score"] = pd.to_numeric(
+            w_df["Score"], errors="coerce"
+        ).fillna(0.0)
+
+        if is_wed:
+            g_mask = (
+                w_df["Full Name"].apply(clean_name_key)
+                == clean_name_key("Gary Fera")
+            )
+            if g_mask.any():
+                w_df.loc[g_mask, "1st Choice"] = "D"
+                w_df.loc[g_mask, "2nd Choice"] = "F"
+
+        avail = w_df[w_df[sel_day] == True].copy()
+        if avail.empty:
+            st.warning(
+                f"No players checked in for **{sel_day}**. "
+                "Use the **Weekly Availability Summary** tab first."
+            )
+            st.stop()
+
+        total = len(avail)
+        TARGET_D = 8
+
+        miss = avail[~avail["1st Choice"].isin(["F", "D"])]
+        if not miss.empty:
+            m_names = ", ".join(miss["Full Name"])
+            st.warning(
+                f"⚠️ Missing 1st Choice for: **{m_names}** "
+                "(assigned as Forward; edit in Summary tab)."
+            )
+
+        bday_msg, bday_names = get_birthday_message(w_df, "B-day")
+        with st.expander("🎂 Birthday Debugger", expanded=True):
+            today = datetime.now()
+            s_wk = (
+                today + timedelta(days=1)
+                if today.weekday() == 6
+                else today - timedelta(days=today.weekday())
+            )
+            e_wk = s_wk + timedelta(days=6)
+            st.write(
+                f"**Scanning Window:** {s_wk.strftime('%a %b %d')}"
+                f" — {e_wk.strftime('%a %b %d')}"
+            )
+            if bday_names:
+                st.success(
+                    f"**Birthdays Found:** {', '.join(bday_names)}"
+                )
+            else:
+                st.info("No birthdays found this week.")
+            st.caption(f"Checked {len(w_df)} players in roster.")
+
+        n_series = avail["Notes"].fillna("").astype(str).str.strip()
+        noted = avail[n_series != ""]
+        if not noted.empty:
+            lbl = f"📝 Active Player Notes ({len(noted)})"
+            with st.expander(lbl, expanded=False):
+                for _, nr in noted.iterrows():
+                    st.write(
+                        f"- **{nr['Full Name']}**: {nr['Notes']}"
+                    )
+
+        avail = avail.sample(
+            frac=1, random_state=st.session_state.shuffle_seed
+        ).reset_index(drop=True)
+        avail["Status_Rank"] = avail["Reg / Spare"].apply(
+            lambda x: 0 if x == "R" else 1
+        )
+        avail = avail.sort_values(
+            by=["Status_Rank", "Score"],
+            ascending=[True, False],
+            kind="mergesort",
+        )
+
+        pool_d = avail[avail["1st Choice"] == "D"].copy()
+        pool_f = avail[avail["1st Choice"] == "F"].copy()
+        pool_oth = avail[
+            ~avail["1st Choice"].isin(["D", "F"])
+        ].copy()
+
+        if len(pool_d) < TARGET_D:
+            needed = TARGET_D - len(pool_d)
+            cands = pool_f[pool_f["2nd Choice"] == "D"].copy()
+            if is_mon and not cands.empty:
+                cands["Is_Gary"] = (
+                    cands["Full Name"].apply(clean_name_key)
+                    == clean_name_key("Gary Fera")
+                )
+                cands = cands.sort_values(
+                    by=["Is_Gary", "Status_Rank", "Score"],
+                    ascending=[True, True, False],
+                    kind="mergesort",
+                ).drop(columns=["Is_Gary"])
+
+            if not cands.empty:
+                conv = cands.head(needed)
+                pool_d = pd.concat([pool_d, conv])
+                pool_f = pool_f.drop(conv.index)
+                mv = ", ".join(conv["Full Name"])
+                st.info(
+                    f"Balanced Defense (4 per team): Moved "
+                    f"{len(conv)} F -> D: **{mv}**"
+                )
+
+        if len(pool_d) > TARGET_D:
+            excess = len(pool_d) - TARGET_D
+            c_2nd = pool_d[pool_d["2nd Choice"] == "F"]
+            if len(c_2nd) >= excess:
+                conv = c_2nd.head(excess)
+            else:
+                rem = excess - len(c_2nd)
+                oth = pool_d.drop(c_2nd.index).tail(rem)
+                conv = pd.concat([c_2nd, oth])
+            pool_f = pd.concat([pool_f, conv])
+            pool_d = pool_d.drop(conv.index)
+            mv = ", ".join(conv["Full Name"])
+            st.info(
+                f"Balanced Defense (capped at 4 per team): Moved "
+                f"{len(conv)} D -> F: **{mv}**"
+            )
+
+        elif len(pool_d) % 2 == 1 and len(pool_d) > 4:
+            c_2nd = pool_d[pool_d["2nd Choice"] == "F"]
+            conv = (
+                c_2nd.head(1) if not c_2nd.empty else pool_d.tail(1)
+            )
+            pool_f = pd.concat([pool_f, conv])
+            pool_d = pool_d.drop(conv.index)
+            mv = ", ".join(conv["Full Name"])
+            d_each = len(pool_d) // 2
+            st.info(
+                f"Evened Defense ({d_each} per team): Moved "
+                f"1 D -> F: **{mv}**"
+            )
+
+        if not pool_oth.empty:
+            pool_f = pd.concat([pool_f, pool_oth])
+
+        d_each = len(pool_d) // 2
+        st.info(
+            f"**Strategy ({sel_day}):** {total} players -> "
+            f"**{len(pool_d)} Defense** ({d_each} per team) & "
+            f"**{len(pool_f)} Forwards**"
+        )
+
+        ta, tb, cuts_d, cuts_f, rival_logs = build_rosters(
+            pool_d, pool_f, is_wed, allow_wed_pair=False
+        )
+
+        if is_wed:
+            c_cnt = min(len(ta), len(tb))
+            gap = abs(
+                get_top_n_score(ta, c_cnt)
+                - get_top_n_score(tb, c_cnt)
+            )
+            if gap > 1.5:
+                alt = build_rosters(
+                    pool_d, pool_f, is_wed, allow_wed_pair=True
+                )
+                ta_a, tb_a, cd_a, cf_a, rl_a = alt
+                a_gap = abs(
+                    get_top_n_score(ta_a, c_cnt)
+                    - get_top_n_score(tb_a, c_cnt)
+                )
+                if a_gap < gap:
+                    ta, tb = ta_a, tb_a
+                    cuts_d, cuts_f = cd_a, cf_a
+                    rival_logs = rl_a
+
+        if st.button("🔀 Shuffle Teams Again"):
+            st.session_state.shuffle_seed += 1
+            st.rerun()
+
+        if rival_logs:
+            st.divider()
+            for r in rival_logs:
+                st.success(f"⚖️ {r}")
+
+        c_cnt = min(len(ta), len(tb))
+        tot_a = ta["Score"].sum()
+        tot_b = tb["Score"].sum()
+        fair_a = get_top_n_score(ta, c_cnt)
+        fair_b = get_top_n_score(tb, c_cnt)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.header("🔴 Red Team")
+            st.write(f"**Total Score:** {tot_a:.1f}")
+            if len(ta) != len(tb):
+                st.write(f"**Top {c_cnt} Score:** {fair_a:.1f}")
+            da_n = len(ta[ta["Position"] == "D"])
+            fa_n = len(ta[ta["Position"] == "F"])
+            st.write(f"Players: {len(ta)} ({da_n} D / {fa_n} F)")
+            st.dataframe(
+                ta[["Full Name", "Position"]],
+                hide_index=True,
+                use_container_width=True,
+            )
+        with c2:
+            st.header("⚪ White Team")
+            st.write(f"**Total Score:** {tot_b:.1f}")
+            if len(ta) != len(tb):
+                st.write(f"**Top {c_cnt} Score:** {fair_b:.1f}")
+            db_n = len(tb[tb["Position"] == "D"])
+            fb_n = len(tb[tb["Position"] == "F"])
+            st.write(f"Players: {len(tb)} ({db_n} D / {fb_n} F)")
+            st.dataframe(
+                tb[["Full Name", "Position"]],
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        if not cuts_d.empty or not cuts_f.empty:
+            st.error(f"🚫 Cuts: {len(cuts_d)} D, {len(cuts_f)} F")
+            if not cuts_d.empty:
+                st.write(f"D: {', '.join(cuts_d['Full Name'])}")
+            if not cuts_f.empty:
+                st.write(f"F: {', '.join(cuts_f['Full Name'])}")
+
+        st.divider()
+        all_p = pd.concat([ta, tb])
+        if not all_p.empty:
+            recips = [
+                e
+                for e in all_p["Email"].unique()
+                if pd.notna(e) and str(e).strip()
+            ]
+            bcc = ",".join(recips)
+            r_txt = format_team_list(ta, "RED TEAM")
+            w_txt = format_team_list(tb, "WHITE TEAM")
+            body = (
+                f"{bday_msg}Hello everyone,\n\n"
+                f"Here are the rosters for the upcoming game:\n\n"
+                f"{r_txt}\n"
+                f"{w_txt}\n"
+                f"Keep your sticks on the ice!"
+            )
+
+            st.text_area("Email Draft", value=body, height=300)
+            subj = urllib.parse.quote(
+                f"Bendo Hockey Lineups - {sel_day}"
+            )
+            s_body = urllib.parse.quote(body)
+            s_bcc = urllib.parse.quote(bcc)
+
+            b1, b2, b3 = st.columns(3)
+            b1.link_button(
+                "📱 Default App",
+                f"mailto:?bcc={s_bcc}&subject={subj}&body={s_body}",
+            )
+            b2.link_button(
+                "💻 Gmail Web",
+                f"https://mail.google.com/mail/?view=cm&fs=1"
+                f"&bcc={s_bcc}&su={subj}&body={s_body}",
+            )
+            b3.link_button(
+                "🍎 iOS Gmail",
+                f"googlegmail:///co?bcc={s_bcc}"
+                f"&subject={subj}&body={s_body}",
+            )
