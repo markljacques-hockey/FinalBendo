@@ -1230,7 +1230,42 @@ if all_sheets is not None:
         if not pool_oth.empty:
             pool_f = pd.concat([pool_f, pool_oth])
 
-        d_each = len(pool_d) // 2
+        # Ensure at least 2 Forward lines per team (12 Forwards total) when possible,
+        # without ever dropping below 3 Defensemen per team (6 Defensemen total)
+        MIN_D_TOTAL = 6
+        MIN_F_TOTAL = 12
+        if len(pool_f) < MIN_F_TOTAL and len(pool_d) > MIN_D_TOTAL:
+            f_shortfall = MIN_F_TOTAL - len(pool_f)
+            max_d_to_move = len(pool_d) - MIN_D_TOTAL
+            want_to_move = min(f_shortfall, max_d_to_move)
+
+            c_2nd_f = pool_d[pool_d["2nd Choice"] == "F"].copy()
+            if is_wed and not c_2nd_f.empty:
+                c_2nd_f["Is_Gary"] = (
+                    c_2nd_f["Full Name"].apply(clean_name_key)
+                    == clean_name_key("Gary Fera")
+                )
+                c_2nd_f = c_2nd_f.sort_values(
+                    by=["Is_Gary", "Status_Rank", "Score"],
+                    ascending=[True, True, False],
+                    kind="mergesort",
+                ).drop(columns=["Is_Gary"])
+
+            if not c_2nd_f.empty and want_to_move > 0:
+                conv_f = c_2nd_f.head(want_to_move)
+                pool_f = pd.concat([pool_f, conv_f])
+                pool_d = pool_d.drop(conv_f.index)
+                mv = ", ".join(conv_f["Full Name"])
+                st.info(
+                    f"Filled Forward Lines (min 3 D per team): Moved "
+                    f"{len(conv_f)} D -> F: **{mv}**"
+                )
+
+        d_each_str = (
+            f"{len(pool_d) // 2} per team"
+            if len(pool_d) % 2 == 0
+            else f"{(len(pool_d) + 1) // 2} / {len(pool_d) // 2} per team"
+        )
         f_each_str = (
             f"{len(pool_f) // 2} per team"
             if len(pool_f) % 2 == 0
@@ -1238,7 +1273,7 @@ if all_sheets is not None:
         )
         st.info(
             f"**Strategy ({sel_day}):** {total} players -> "
-            f"**{len(pool_d)} Defense** ({d_each} per team) & "
+            f"**{len(pool_d)} Defense** ({d_each_str}) & "
             f"**{len(pool_f)} Forwards** ({f_each_str})"
         )
 
