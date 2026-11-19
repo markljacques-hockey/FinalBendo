@@ -286,25 +286,29 @@ def score_aware_snake_draft(
 
     # Score-aware swap optimization within this position
     # (only swaps drafted players, keeping pre-assigned rivals locked)
-    score_pre_a = sum(float(p["Score"]) for p in pre_a_list)
-    score_pre_b = sum(float(p["Score"]) for p in pre_b_list)
+    pre_scores_a = [float(p["Score"]) for p in pre_a_list]
+    pre_scores_b = [float(p["Score"]) for p in pre_b_list]
+    n_compare = min(len(pre_scores_a) + len(list_a), len(pre_scores_b) + len(list_b))
+
+    def pos_gap(la, lb):
+        sa_all = sorted(pre_scores_a + [float(r["Score"]) for r in la], reverse=True)
+        sb_all = sorted(pre_scores_b + [float(r["Score"]) for r in lb], reverse=True)
+        return abs(sum(sa_all[:n_compare]) - sum(sb_all[:n_compare]))
 
     improved = True
-    while improved and list_a and list_b:
+    while improved and list_a and list_b and n_compare > 0:
         improved = False
-        cur_a = score_pre_a + sum(float(r["Score"]) for r in list_a)
-        cur_b = score_pre_b + sum(float(r["Score"]) for r in list_b)
-        cur_diff = abs(cur_a - cur_b)
+        cur_diff = pos_gap(list_a, list_b)
         if cur_diff <= 0.01:
             break
 
         best_diff = cur_diff
         best_pair = None
-        for idx_a, ra in enumerate(list_a):
-            sa = float(ra["Score"])
-            for idx_b, rb in enumerate(list_b):
-                sb = float(rb["Score"])
-                new_diff = abs((cur_a - sa + sb) - (cur_b - sb + sa))
+        for idx_a in range(len(list_a)):
+            for idx_b in range(len(list_b)):
+                list_a[idx_a], list_b[idx_b] = list_b[idx_b], list_a[idx_a]
+                new_diff = pos_gap(list_a, list_b)
+                list_a[idx_a], list_b[idx_b] = list_b[idx_b], list_a[idx_a]
                 if new_diff + 1e-6 < best_diff:
                     best_diff = new_diff
                     best_pair = (idx_a, idx_b)
@@ -1364,10 +1368,26 @@ if all_sheets is not None:
         tot_b = tb["Score"].sum()
         fair_a = get_top_n_score(ta, c_cnt)
         fair_b = get_top_n_score(tb, c_cnt)
-        def_a = ta[ta["Position"] == "D"]["Score"].sum()
-        fwd_a = ta[ta["Position"] == "F"]["Score"].sum()
-        def_b = tb[tb["Position"] == "D"]["Score"].sum()
-        fwd_b = tb[tb["Position"] == "F"]["Score"].sum()
+
+        ta_d = ta[ta["Position"] == "D"]
+        ta_f = ta[ta["Position"] == "F"]
+        tb_d = tb[tb["Position"] == "D"]
+        tb_f = tb[tb["Position"] == "F"]
+
+        da_n, fa_n = len(ta_d), len(ta_f)
+        db_n, fb_n = len(tb_d), len(tb_f)
+
+        def_a = ta_d["Score"].sum()
+        fwd_a = ta_f["Score"].sum()
+        def_b = tb_d["Score"].sum()
+        fwd_b = tb_f["Score"].sum()
+
+        min_d = min(da_n, db_n)
+        min_f = min(fa_n, fb_n)
+        top_def_a = get_top_n_score(ta_d, min_d)
+        top_def_b = get_top_n_score(tb_d, min_d)
+        top_fwd_a = get_top_n_score(ta_f, min_f)
+        top_fwd_b = get_top_n_score(tb_f, min_f)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -1379,8 +1399,17 @@ if all_sheets is not None:
                 f"**Defense Score:** {def_a:.1f} | "
                 f"**Forward Score:** {fwd_a:.1f}"
             )
-            da_n = len(ta[ta["Position"] == "D"])
-            fa_n = len(ta[ta["Position"] == "F"])
+            top_pos_a = []
+            if da_n != db_n:
+                top_pos_a.append(
+                    f"**Top {min_d} Defense Score:** {top_def_a:.1f}"
+                )
+            if fa_n != fb_n:
+                top_pos_a.append(
+                    f"**Top {min_f} Forward Score:** {top_fwd_a:.1f}"
+                )
+            if top_pos_a:
+                st.write(" | ".join(top_pos_a))
             st.write(f"Players: {len(ta)} ({da_n} D / {fa_n} F)")
             h_a = (len(ta) + 1) * 35 + 3
             st.dataframe(
@@ -1398,8 +1427,17 @@ if all_sheets is not None:
                 f"**Defense Score:** {def_b:.1f} | "
                 f"**Forward Score:** {fwd_b:.1f}"
             )
-            db_n = len(tb[tb["Position"] == "D"])
-            fb_n = len(tb[tb["Position"] == "F"])
+            top_pos_b = []
+            if da_n != db_n:
+                top_pos_b.append(
+                    f"**Top {min_d} Defense Score:** {top_def_b:.1f}"
+                )
+            if fa_n != fb_n:
+                top_pos_b.append(
+                    f"**Top {min_f} Forward Score:** {top_fwd_b:.1f}"
+                )
+            if top_pos_b:
+                st.write(" | ".join(top_pos_b))
             st.write(f"Players: {len(tb)} ({db_n} D / {fb_n} F)")
             h_b = (len(tb) + 1) * 35 + 3
             st.dataframe(
