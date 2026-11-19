@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
 import urllib.parse
+import urllib.request
+import io
+import re
 from datetime import datetime, timedelta
 
 # --- 1. CONFIGURATION ---
@@ -9,7 +12,7 @@ st.set_page_config(page_title="Hockey Team Balancer")
 if "shuffle_seed" not in st.session_state:
     st.session_state.shuffle_seed = 0
 
-# --- 2. CACHED DATA LOADER ---
+# --- 2. CACHED DATA LOADERS (EXCEL & GOOGLE SHEETS) ---
 @st.cache_data
 def load_excel_data(uploaded_file):
     try:
@@ -17,6 +20,24 @@ def load_excel_data(uploaded_file):
         return pd.read_excel(uploaded_file, sheet_name=None, header=1), None
     except Exception as e:
         return None, str(e)
+
+@st.cache_data(ttl=60)
+def load_google_sheet_data(sheet_url):
+    try:
+        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", sheet_url)
+        if not match:
+            return None, "Invalid Google Sheets URL. Please paste the full link from your browser."
+        sheet_id = match.group(1)
+        export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+        req = urllib.request.Request(export_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            xlsx_bytes = response.read()
+        return pd.read_excel(io.BytesIO(xlsx_bytes), sheet_name=None, header=1), None
+    except Exception as e:
+        return None, (
+            f"Could not read Google Sheet ({e}). "
+            "Make sure the Google Sheet's Share settings are set to 'Anyone with the link can view'."
+        )
 
 # --- 3. HELPER FUNCTIONS ---
 def true_snake_draft(players, pre_count_a=0, pre_count_b=0):
@@ -37,7 +58,7 @@ def true_snake_draft(players, pre_count_a=0, pre_count_b=0):
             pick_a = not pick_a
 
         if pick_a:
-            team_a_list.append(player := players.iloc[i])
+            team_a_list.append(players.iloc[i])
         else:
             team_b_list.append(players.iloc[i])
 
@@ -232,18 +253,42 @@ def build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False):
 
 # --- 4. MAIN APP ---
 st.title("🏒 Hockey Team Generator")
-st.write("Upload your Excel player sheet.")
 
-uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx', 'xls', 'xlsm'])
+source_type = st.radio(
+    "Choose Roster Source:",
+    ["📁 Upload Excel File", "🔗 Google Sheets Link"],
+    horizontal=True
+)
 
-if uploaded_file is not None:
-    all_sheets, error_msg = load_excel_data(uploaded_file)
+all_sheets = None
+error_msg = None
 
-    if error_msg:
-        st.error(f"❌ Error reading file: {error_msg}")
-        st.warning("Troubleshooting:\n1. Ensure file is not open in Excel.\n2. Ensure file is not password protected.")
-        st.stop()
+if source_type == "📁 Upload Excel File":
+    uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx', 'xls', 'xlsm'])
+    if uploaded_file is not None:
+        all_sheets, error_msg = load_excel_data(uploaded_file)
+else:
+    col_url, col_ref = st.columns([4, 1])
+    with col_url:
+        sheet_url = st.text_input(
+            "Paste Google Sheets URL:",
+            placeholder="https://docs.google.com/spreadsheets/d/..."
+        )
+    with col_ref:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Refresh"):
+            load_google_sheet_data.clear()
+            st.rerun()
 
+    if sheet_url.strip():
+        all_sheets, error_msg = load_google_sheet_data(sheet_url.strip())
+
+if error_msg:
+    st.error(f"❌ {error_msg}")
+    st.stop()
+
+if all_sheets is not None:
     all_sheet_names = list(all_sheets.keys())
     master_sheet_name = next((s for s in all_sheet_names if "master" in s.lower()), None)
 
