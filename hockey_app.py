@@ -9,18 +9,13 @@ from datetime import datetime, timedelta
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Hockey Team Balancer", layout="wide")
 
+# PASTE YOUR GOOGLE SHEET URL BETWEEN THE QUOTES BELOW:
+DEFAULT_GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/11bgbSoRAAL79hYniKkyI4w0wMOAgSSFe/edit?usp=sharing&ouid=114162045734133679348&rtpof=true&sd=true"
+
 if "shuffle_seed" not in st.session_state:
     st.session_state.shuffle_seed = 0
 
-# --- 2. CACHED DATA LOADERS ---
-@st.cache_data
-def load_excel_data(uploaded_file):
-    try:
-        data = pd.read_excel(uploaded_file, sheet_name=None, header=1)
-        return data, None
-    except Exception as e:
-        return None, str(e)
-
+# --- 2. CACHED GOOGLE SHEET LOADER ---
 @st.cache_data(ttl=60)
 def load_google_sheet_data(sheet_url):
     try:
@@ -517,44 +512,31 @@ def build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False):
 # --- 4. MAIN APP ---
 st.title("🏒 Hockey Team Generator")
 
-source_type = st.radio(
-    "Choose Roster Source:",
-    ["📁 Upload Excel File", "🔗 Google Sheets Link"],
-    horizontal=True,
-)
-
-all_sheets = None
-error_msg = None
-source_signature = ""
-
-if source_type == "📁 Upload Excel File":
-    uploaded_file = st.file_uploader(
-        "Upload Excel File", type=["xlsx", "xls", "xlsm"]
+col_url, col_ref = st.columns([4, 1])
+with col_url:
+    sheet_url = st.text_input(
+        "Google Sheets Link:",
+        value=DEFAULT_GOOGLE_SHEET_URL,
+        placeholder="https://docs.google.com/spreadsheets/d/...",
     )
-    if uploaded_file is not None:
-        all_sheets, error_msg = load_excel_data(uploaded_file)
-        source_signature = (
-            f"file_{uploaded_file.name}_{uploaded_file.size}"
-        )
-else:
-    col_url, col_ref = st.columns([4, 1])
-    with col_url:
-        sheet_url = st.text_input(
-            "Paste Google Sheets URL:",
-            placeholder="https://docs.google.com/spreadsheets/d/...",
-        )
-    with col_ref:
-        st.write("")
-        st.write("")
-        if st.button("🔄 Refresh"):
-            load_google_sheet_data.clear()
-            if "summary_df" in st.session_state:
-                del st.session_state["summary_df"]
-            st.rerun()
+with col_ref:
+    st.write("")
+    st.write("")
+    if st.button("🔄 Refresh Sheet"):
+        load_google_sheet_data.clear()
+        if "summary_df" in st.session_state:
+            del st.session_state["summary_df"]
+        st.rerun()
 
-    if sheet_url.strip():
-        all_sheets, error_msg = load_google_sheet_data(sheet_url.strip())
-        source_signature = f"gsheet_{sheet_url.strip()}"
+if "YOUR_SHEET_ID_HERE" in sheet_url or not sheet_url.strip():
+    st.info(
+        "Paste your Google Sheets URL above (or save it permanently in "
+        "`DEFAULT_GOOGLE_SHEET_URL` inside `hockey_app.py`)."
+    )
+    st.stop()
+
+all_sheets, error_msg = load_google_sheet_data(sheet_url.strip())
+source_signature = f"gsheet_{sheet_url.strip()}"
 
 if error_msg:
     st.error(f"❌ {error_msg}")
@@ -655,7 +637,7 @@ if all_sheets is not None:
         for col in display_cols:
             st.session_state.summary_df[col] = edited_view[col]
 
-        if st.button("↩️ Reset Checkboxes to File Defaults"):
+        if st.button("↩️ Reset Checkboxes to Sheet Defaults"):
             st.session_state.summary_df = build_summary_table(
                 all_sheets, valid_sheets, master_sheet_name
             )
