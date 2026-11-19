@@ -309,6 +309,24 @@ def clean_name_key(name):
     return str(name).lower().replace(" ", "").strip()
 
 
+def style_spare_rows(df, disp_cols):
+    if df.empty or "Reg / Spare" not in df.columns:
+        return df[disp_cols]
+    is_spare = (
+        df["Reg / Spare"].fillna("").astype(str).str.strip().str.upper()
+        == "S"
+    )
+
+    def highlight(row):
+        if is_spare.loc[row.name]:
+            return ["background-color: #EFEFEF; color: #333333"] * len(
+                row
+            )
+        return [""] * len(row)
+
+    return df[disp_cols].style.apply(highlight, axis=1)
+
+
 def find_col(df, names):
     if isinstance(names, str):
         names = [names]
@@ -686,7 +704,13 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
     fa, fb = true_snake_draft(sel_f, pre_fa, pre_fb)
 
     cols = [
-        "Full Name", "Position", "Score", "Email", "Phone", "Notes"
+        "Full Name",
+        "Position",
+        "Reg / Spare",
+        "Score",
+        "Email",
+        "Phone",
+        "Notes",
     ]
 
     def to_df(lst):
@@ -824,8 +848,11 @@ if all_sheets is not None:
                 day, default=False, width="small"
             )
 
+        styled_summary = style_spare_rows(
+            st.session_state.summary_df, disp_cols
+        )
         edited = st.data_editor(
-            st.session_state.summary_df[disp_cols],
+            styled_summary,
             column_config=cfg,
             hide_index=True,
             use_container_width=True,
@@ -1131,7 +1158,7 @@ if all_sheets is not None:
             fa_n = len(ta[ta["Position"] == "F"])
             st.write(f"Players: {len(ta)} ({da_n} D / {fa_n} F)")
             st.dataframe(
-                ta[["Full Name", "Position"]],
+                style_spare_rows(ta, ["Full Name", "Position"]),
                 hide_index=True,
                 use_container_width=True,
             )
@@ -1144,7 +1171,7 @@ if all_sheets is not None:
             fb_n = len(tb[tb["Position"] == "F"])
             st.write(f"Players: {len(tb)} ({db_n} D / {fb_n} F)")
             st.dataframe(
-                tb[["Full Name", "Position"]],
+                style_spare_rows(tb, ["Full Name", "Position"]),
                 hide_index=True,
                 use_container_width=True,
             )
