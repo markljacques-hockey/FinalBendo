@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Hockey Team Balancer")
+st.set_page_config(page_title="Hockey Team Balancer", layout="wide")
 
 if "shuffle_seed" not in st.session_state:
     st.session_state.shuffle_seed = 0
@@ -16,7 +16,6 @@ if "shuffle_seed" not in st.session_state:
 @st.cache_data
 def load_excel_data(uploaded_file):
     try:
-        # sheet_name=None reads ALL sheets; header=1 means Row 2 is the header
         return pd.read_excel(uploaded_file, sheet_name=None, header=1), None
     except Exception as e:
         return None, str(e)
@@ -98,7 +97,120 @@ def find_col_case_insensitive(df, target_names):
             return col
     return None
 
-def get_birthday_message(players_df, bday_col):
+def extract_clean_sheet_df(raw_df):
+    """Normalizes a single worksheet into standard columns and removes empty rows."""
+    df = raw_df.copy()
+    col_name = find_col_case_insensitive(df, ['name', 'full name', 'fullname'])
+    col_first = find_col_case_insensitive(df, ['first_name', 'first name', 'firstname'])
+    col_last = find_col_case_insensitive(df, ['last_name', 'last name', 'lastname'])
+
+    if col_name:
+        df['Full Name'] = df[col_name].fillna('').astype(str).str.strip()
+        if col_first and col_last:
+            fallback_names = (
+                df[col_first].fillna('').astype(str).str.strip() + ' ' +
+                df[col_last].fillna('').astype(str).str.strip()
+            ).str.strip()
+            df['Full Name'] = df['Full Name'].where(df['Full Name'] != '', fallback_names)
+    elif col_first and col_last:
+        df['Full Name'] = (
+            df[col_first].fillna('').astype(str).str.strip() + ' ' +
+            df[col_last].fillna('').astype(str).str.strip()
+        ).str.strip()
+    else:
+        df['Full Name'] = ''
+
+    df = df[df['Full Name'] != ''].copy()
+    df['Key'] = df['Full Name'].apply(clean_name_key)
+
+    col_avail = find_col_case_insensitive(df, ['availability', 'avail'])
+    col_choice = find_col_case_insensitive(df, ['1st choice', '1stchoice', 'position'])
+    col_2nd = find_col_case_insensitive(df, ['2nd choice', '2ndchoice'])
+    col_score = find_col_case_insensitive(df, ['score', 'rating', 'skill'])
+    col_email = find_col_case_insensitive(df, ['email', 'e-mail'])
+    col_reg = find_col_case_insensitive(df, ['reg / spare', 'reg/spare', 'status'])
+    col_notes = find_col_case_insensitive(df, ['notes', 'note'])
+    col_phone = find_col_case_insensitive(df, ['phone', 'phone number'])
+    col_days = find_col_case_insensitive(df, ['days', 'day'])
+    col_bday = find_col_case_insensitive(df, ['b-day', 'bday', 'birthday', 'dob'])
+
+    df['Availability'] = df[col_avail].fillna('').astype(str).str.strip().str.upper() if col_avail else 'N'
+    df['1st Choice'] = df[col_choice].fillna('').astype(str).str.strip().str.upper() if col_choice else ''
+    df['2nd Choice'] = df[col_2nd].fillna('').astype(str).str.strip().str.upper() if col_2nd else ''
+    df['Score'] = pd.to_numeric(df[col_score], errors='coerce').fillna(0.0) if col_score else 0.0
+    df['Email'] = df[col_email].fillna('').astype(str).str.strip() if col_email else ''
+    df['Reg / Spare'] = df[col_reg].fillna('S').astype(str).str.strip().str.upper() if col_reg else 'S'
+    df['Notes'] = df[col_notes].fillna('').astype(str).str.strip() if col_notes else ''
+    df['Phone'] = df[col_phone].fillna('').astype(str).str.strip() if col_phone else ''
+    df['Days'] = df[col_days].fillna('').astype(str).str.strip() if col_days else ''
+    df['B-day'] = pd.to_datetime(df[col_bday], errors='coerce') if col_bday else pd.NaT
+
+    return df
+
+def build_summary_table(all_sheets, valid_sheets, master_sheet_name):
+    """
+    Combines Master + all daily game sheets into one unified summary table
+    with boolean checkboxes for each game day.
+    """
+    players_dict = {}
+
+    # 1. Seed from Master sheet first so every league player is included
+    if master_sheet_name and master_sheet_name in all_sheets:
+        df_m = extract_clean_sheet_df(all_sheets[master_sheet_name])
+        for _, row in df_m.iterrows():
+            k = row['Key']
+            if k not in players_dict:
+                players_dict[k] = {
+                    'Key': k,
+                    'Full Name': row['Full Name'],
+                    'Reg / Spare': row['Reg / Spare'] if row['Reg / Spare'] in ['R', 'S'] else 'S',
+                    '1st Choice': row['1st Choice'],
+                    '2nd Choice': row['2nd Choice'],
+                    'Score': float(row['Score']),
+                    'Email': row['Email'],
+                    'Phone': row['Phone'],
+                    'Notes': row['Notes'],
+                    'B-day': row['B-day'],
+                    **{day: False for day in valid_sheets}
+                }
+
+    # 2. Merge each game day's roster & availability
+    for day in valid_sheets:
+        df_d = extract_clean_sheet_df(all_sheets[day])
+        for _, row in df_d.iterrows():
+            k = row['Key']
+            is_avail = row['Availability'].startswith('Y')
+            if k not in players_dict:
+                players_dict[k] = {
+                    'Key': k,
+                    'Full Name': row['Full Name'],
+                    'Reg / Spare': row['Reg / Spare'] if row['Reg / Spare'] in ['R', 'S'] else 'S',
+                    '1st Choice': row['1st Choice'],
+                    '2nd Choice': row['2nd Choice'],
+                    'Score': float(row['Score']),
+                    'Email': row['Email'],
+                    'Phone': row['Phone'],
+                    'Notes': row['Notes'],
+                    'B-day': row['B-day'],
+                    **{d: False for d in valid_sheets}
+                }
+            else:
+                # Fill in any missing fields if blank in Master
+                for col in ['1st Choice', '2nd Choice', 'Email', 'Phone', 'Notes']:
+                    if not players_dict[k][col] and row[col]:
+                        players_dict[k][col] = row[col]
+                if players_dict[k]['Score'] == 0 and row['Score'] > 0:
+                    players_dict[k]['Score'] = float(row['Score'])
+
+            players_dict[k][day] = is_avail
+
+    summary_df = pd.DataFrame(list(players_dict.values()))
+    if not summary_df.empty:
+        summary_df['Status_Sort'] = summary_df['Reg / Spare'].apply(lambda x: 0 if x == 'R' else 1)
+        summary_df = summary_df.sort_values(by=['Status_Sort', 'Full Name']).drop(columns=['Status_Sort']).reset_index(drop=True)
+    return summary_df
+
+def get_birthday_message(players_df, bday_col='B-day'):
     if not bday_col or bday_col not in players_df.columns:
         return "", []
 
@@ -210,7 +322,6 @@ def build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False):
         if 'K' in df_x.columns:
             del df_x['K']
 
-    # Preserve tie-break shuffle order while sorting by Reg/Spare then Score
     pd_work = pd_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False], kind='mergesort')
     pf_work = pf_work.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False], kind='mergesort')
 
@@ -262,11 +373,13 @@ source_type = st.radio(
 
 all_sheets = None
 error_msg = None
+source_signature = ""
 
 if source_type == "📁 Upload Excel File":
     uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx', 'xls', 'xlsm'])
     if uploaded_file is not None:
         all_sheets, error_msg = load_excel_data(uploaded_file)
+        source_signature = f"file_{uploaded_file.name}_{uploaded_file.size}"
 else:
     col_url, col_ref = st.columns([4, 1])
     with col_url:
@@ -279,10 +392,13 @@ else:
         st.write("")
         if st.button("🔄 Refresh"):
             load_google_sheet_data.clear()
+            if "summary_df" in st.session_state:
+                del st.session_state["summary_df"]
             st.rerun()
 
     if sheet_url.strip():
         all_sheets, error_msg = load_google_sheet_data(sheet_url.strip())
+        source_signature = f"gsheet_{sheet_url.strip()}"
 
 if error_msg:
     st.error(f"❌ {error_msg}")
@@ -292,7 +408,6 @@ if all_sheets is not None:
     all_sheet_names = list(all_sheets.keys())
     master_sheet_name = next((s for s in all_sheet_names if "master" in s.lower()), None)
 
-    # Strictly exclude Master, Instructions, and reference tabs
     block_list = ["master", "instructions", "instruction", "reference", "setup"]
     valid_sheets = [s for s in all_sheet_names if not any(b in s.strip().lower() for b in block_list)]
 
@@ -300,280 +415,144 @@ if all_sheets is not None:
         st.error("No valid game sheets found (Hidden: Master, Instructions).")
         st.stop()
 
-    selected_sheet = st.selectbox("Select Roster:", valid_sheets)
-    df = all_sheets[selected_sheet].copy()
-    is_monday = "monday" in selected_sheet.strip().lower()
-    is_wednesday = "wednesday" in selected_sheet.strip().lower()
+    # Initialize or reload summary table when a new file/link is provided
+    if st.session_state.get("source_signature") != source_signature or "summary_df" not in st.session_state:
+        st.session_state.summary_df = build_summary_table(all_sheets, valid_sheets, master_sheet_name)
+        st.session_state.source_signature = source_signature
 
-    # --- NORMALIZE COLUMNS ---
-    col_name = find_col_case_insensitive(df, ['name', 'full name', 'fullname'])
-    col_first = find_col_case_insensitive(df, ['first_name', 'first name', 'firstname'])
-    col_last = find_col_case_insensitive(df, ['last_name', 'last name', 'lastname'])
-    col_avail = find_col_case_insensitive(df, ['availability', 'avail'])
-    col_choice = find_col_case_insensitive(df, ['1st choice', '1stchoice', 'position'])
-    col_score = find_col_case_insensitive(df, ['score', 'rating', 'skill'])
+    tab_summary, tab_lineups = st.tabs(["📋 Weekly Availability Summary", "🏒 Generate Day Lineups"])
 
-    if not (col_name or (col_first and col_last)):
-        st.error(f"Missing Name columns in '{selected_sheet}'.")
-        st.stop()
-    if not col_avail or not col_score or not col_choice:
-        st.error(f"Missing columns (Availability, Score, or 1st Choice) in '{selected_sheet}'.")
-        st.stop()
+    # --- TAB 1: INTERACTIVE MULTI-DAY SUMMARY CHART ---
+    with tab_summary:
+        st.subheader("Master Roster & Game-Day Availability")
+        st.write("Check or uncheck who is playing on each day below. Any changes automatically update the **Generate Day Lineups** tab.")
 
-    # Build Full Name and filter out empty template rows
-    if col_name:
-        df['Full Name'] = df[col_name].fillna('').astype(str).str.strip()
-        if col_first and col_last:
-            fallback_names = (
-                df[col_first].fillna('').astype(str).str.strip() + ' ' +
-                df[col_last].fillna('').astype(str).str.strip()
-            ).str.strip()
-            df['Full Name'] = df['Full Name'].where(df['Full Name'] != '', fallback_names)
-    else:
-        df['Full Name'] = (
-            df[col_first].fillna('').astype(str).str.strip() + ' ' +
-            df[col_last].fillna('').astype(str).str.strip()
-        ).str.strip()
+        # Quick headcount metrics per day
+        metric_cols = st.columns(len(valid_sheets))
+        for idx, day in enumerate(valid_sheets):
+            count_in = int(st.session_state.summary_df[day].sum())
+            metric_cols[idx].metric(label=f"{day} Players In", value=count_in)
 
-    df = df[df['Full Name'] != ''].copy()
+        display_cols = ['Full Name', 'Reg / Spare'] + valid_sheets + ['1st Choice', '2nd Choice', 'Score', 'Notes']
 
-    # Map existing and newly added columns
-    col_2nd = find_col_case_insensitive(df, ['2nd choice', '2ndchoice'])
-    col_email = find_col_case_insensitive(df, ['email', 'e-mail'])
-    col_reg = find_col_case_insensitive(df, ['reg / spare', 'reg/spare', 'status'])
-    col_notes = find_col_case_insensitive(df, ['notes', 'note'])
-    col_phone = find_col_case_insensitive(df, ['phone', 'phone number'])
-    col_days = find_col_case_insensitive(df, ['days', 'day'])
+        col_config = {
+            "Full Name": st.column_config.TextColumn("Player Name", disabled=True),
+            "Reg / Spare": st.column_config.SelectboxColumn("Reg / Spare", options=["R", "S"], width="small"),
+            "1st Choice": st.column_config.SelectboxColumn("1st Choice", options=["F", "D", ""], width="small"),
+            "2nd Choice": st.column_config.SelectboxColumn("2nd Choice", options=["F", "D", "G", ""], width="small"),
+            "Score": st.column_config.NumberColumn("Score", min_value=0.0, max_value=10.0, step=0.5, width="small"),
+            "Notes": st.column_config.TextColumn("Notes"),
+        }
+        for day in valid_sheets:
+            col_config[day] = st.column_config.CheckboxColumn(day, default=False, width="small")
 
-    df['Availability'] = df[col_avail].fillna('').astype(str).str.strip().str.upper()
-    df['1st Choice'] = df[col_choice].fillna('').astype(str).str.strip().str.upper()
-    df['2nd Choice'] = df[col_2nd].fillna('').astype(str).str.strip().str.upper() if col_2nd else ''
-    df['Score'] = pd.to_numeric(df[col_score], errors='coerce').fillna(0)
-    df['Email'] = df[col_email].fillna('').astype(str).str.strip() if col_email else ''
-    df['Reg / Spare'] = df[col_reg].fillna('S').astype(str).str.strip().str.upper() if col_reg else 'R'
-    df['Notes'] = df[col_notes].fillna('').astype(str).str.strip() if col_notes else ''
-    df['Phone'] = df[col_phone].fillna('').astype(str).str.strip() if col_phone else ''
-    df['Days'] = df[col_days].fillna('').astype(str).str.strip() if col_days else ''
-
-    # --- DAY-SPECIFIC POSITION OVERRIDE ---
-    # Gary Fera regularly plays Defense on Wednesdays
-    if is_wednesday:
-        gary_mask = df['Full Name'].apply(clean_name_key) == clean_name_key("Gary Fera")
-        if gary_mask.any():
-            df.loc[gary_mask, '1st Choice'] = 'D'
-            df.loc[gary_mask, '2nd Choice'] = 'F'
-
-    # --- MASTER LOOKUP (BIRTHDAYS) ---
-    bday_col_name = 'B-day'
-    birthday_source = df
-
-    if master_sheet_name:
-        try:
-            df_master = all_sheets[master_sheet_name].copy()
-            m_name = find_col_case_insensitive(df_master, ['name', 'full name'])
-            m_first = find_col_case_insensitive(df_master, ['first_name', 'first name'])
-            m_last = find_col_case_insensitive(df_master, ['last_name', 'last name'])
-            m_bday = find_col_case_insensitive(df_master, ['b-day', 'bday', 'birthday', 'dob'])
-
-            if m_name:
-                df_master['Full Name'] = df_master[m_name].fillna('').astype(str).str.strip()
-                if m_first and m_last:
-                    m_fallback = (
-                        df_master[m_first].fillna('').astype(str).str.strip() + ' ' +
-                        df_master[m_last].fillna('').astype(str).str.strip()
-                    ).str.strip()
-                    df_master['Full Name'] = df_master['Full Name'].where(df_master['Full Name'] != '', m_fallback)
-            elif m_first and m_last:
-                df_master['Full Name'] = (
-                    df_master[m_first].fillna('').astype(str).str.strip() + ' ' +
-                    df_master[m_last].fillna('').astype(str).str.strip()
-                ).str.strip()
-            else:
-                df_master['Full Name'] = ''
-
-            df_master = df_master[df_master['Full Name'] != ''].copy()
-            df_master['Key'] = df_master['Full Name'].apply(clean_name_key)
-
-            if m_bday:
-                df_master[bday_col_name] = pd.to_datetime(df_master[m_bday], errors='coerce')
-                birthday_source = df_master
-
-                df_master_unique = df_master.drop_duplicates(subset=['Key'])
-                bday_map = df_master_unique.set_index('Key')[bday_col_name].to_dict()
-                df['Key'] = df['Full Name'].apply(clean_name_key)
-                df[bday_col_name] = df['Key'].map(bday_map)
-            else:
-                st.warning("Master sheet found but missing 'B-day' column.")
-        except Exception as e:
-            st.warning(f"Master sheet error: {e}")
-    else:
-        daily_bday = find_col_case_insensitive(df, ['b-day', 'bday', 'birthday'])
-        if daily_bday:
-            bday_col_name = daily_bday
-            df[bday_col_name] = pd.to_datetime(df[bday_col_name], errors='coerce')
-
-    # --- FILTER AVAILABLE PLAYERS ---
-    available = df[df['Availability'].str.startswith('Y')].copy()
-    if available.empty:
-        st.error("No players marked 'Y' or 'Yes'.")
-        st.stop()
-
-    # --- TARGETS: ALWAYS BALANCE DEFENSE TO 4 PER TEAM (8 TOTAL), REMAINDER AS FORWARDS ---
-    total = len(available)
-    TARGET_D = 8        # 4 Defensemen per team
-
-    missing_pos = available[~available['1st Choice'].isin(['F', 'D'])]
-    if not missing_pos.empty:
-        st.warning(
-            f"⚠️ Missing 1st Choice position for: **{', '.join(missing_pos['Full Name'])}** "
-            "(assigned as Forward; check Master sheet if needed)."
+        edited_view = st.data_editor(
+            st.session_state.summary_df[display_cols],
+            column_config=col_config,
+            hide_index=True,
+            use_container_width=True,
+            height=600,
+            key="attendance_editor"
         )
 
-    # --- BIRTHDAY CHECK ---
-    bday_msg, bday_names = get_birthday_message(birthday_source, bday_col_name)
-    with st.expander("🎂 Birthday Debugger", expanded=True):
-        today = datetime.now()
-        s_week = today + timedelta(days=1) if today.weekday() == 6 else today - timedelta(days=today.weekday())
-        e_week = s_week + timedelta(days=6)
-        st.write(f"**Scanning Window:** {s_week.strftime('%a %b %d')} — {e_week.strftime('%a %b %d')}")
-        if bday_names:
-            st.success(f"**Birthdays Found:** {', '.join(bday_names)}")
-        else:
-            st.info("No birthdays found this week (checked Master list).")
-        st.caption(f"Checked {len(birthday_source)} players in Master list.")
+        # Sync user edits back into session_state.summary_df
+        for col in display_cols:
+            st.session_state.summary_df[col] = edited_view[col]
 
-    noted_players = available[available['Notes'] != '']
-    if not noted_players.empty:
-        with st.expander(f"📝 Active Player Notes ({len(noted_players)})", expanded=False):
-            for _, nrow in noted_players.iterrows():
-                st.write(f"- **{nrow['Full Name']}**: {nrow['Notes']}")
+        if st.button("↩️ Reset Checkboxes to File Defaults"):
+            st.session_state.summary_df = build_summary_table(all_sheets, valid_sheets, master_sheet_name)
+            st.rerun()
 
-    # --- SHUFFLE TIE-BREAKS & SORT POOLS ---
-    available = available.sample(frac=1, random_state=st.session_state.shuffle_seed).reset_index(drop=True)
-    available['Status_Rank'] = available['Reg / Spare'].apply(lambda x: 0 if x == 'R' else 1)
-    available = available.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False], kind='mergesort')
+    # --- TAB 2: LINEUP GENERATOR FOR SELECTED DAY ---
+    with tab_lineups:
+        selected_sheet = st.selectbox("Select Game Day to Generate Lineups:", valid_sheets)
+        is_monday = "monday" in selected_sheet.strip().lower()
+        is_wednesday = "wednesday" in selected_sheet.strip().lower()
 
-    pool_d = available[available['1st Choice'] == 'D'].copy()
-    pool_f = available[available['1st Choice'] == 'F'].copy()
-    pool_other = available[~available['1st Choice'].isin(['D', 'F'])].copy()
+        working_df = st.session_state.summary_df.copy()
+        working_df['1st Choice'] = working_df['1st Choice'].fillna('').astype(str).str.strip().str.upper()
+        working_df['2nd Choice'] = working_df['2nd Choice'].fillna('').astype(str).str.strip().str.upper()
+        working_df['Reg / Spare'] = working_df['Reg / Spare'].fillna('S').astype(str).str.strip().str.upper()
+        working_df['Score'] = pd.to_numeric(working_df['Score'], errors='coerce').fillna(0.0)
 
-    # --- POSITIONAL BALANCER LOGIC (Target 4 D per team = 8 D total) ---
-    if len(pool_d) < TARGET_D:
-        needed = TARGET_D - len(pool_d)
-        candidates = pool_f[pool_f['2nd Choice'] == 'D'].copy()
-        # On Mondays, keep Gary Fera at Forward unless all other F->D options are exhausted
-        if is_monday and not candidates.empty:
-            candidates['Is_Gary'] = candidates['Full Name'].apply(clean_name_key) == clean_name_key("Gary Fera")
-            candidates = candidates.sort_values(
-                by=['Is_Gary', 'Status_Rank', 'Score'], ascending=[True, True, False], kind='mergesort'
-            ).drop(columns=['Is_Gary'])
+        # --- DAY-SPECIFIC POSITION OVERRIDE ---
+        # Gary Fera regularly plays Defense on Wednesdays
+        if is_wednesday:
+            gary_mask = working_df['Full Name'].apply(clean_name_key) == clean_name_key("Gary Fera")
+            if gary_mask.any():
+                working_df.loc[gary_mask, '1st Choice'] = 'D'
+                working_df.loc[gary_mask, '2nd Choice'] = 'F'
 
-        if not candidates.empty:
-            conv = candidates.head(needed)
-            pool_d = pd.concat([pool_d, conv])
-            pool_f = pool_f.drop(conv.index)
-            st.info(f"Balanced Defense (4 per team): Moved {len(conv)} F -> D: **{', '.join(conv['Full Name'])}**")
+        # Filter to players checked 'True' for the chosen day
+        available = working_df[working_df[selected_sheet] == True].copy()
+        if available.empty:
+            st.warning(f"No players are currently checked as available for **{selected_sheet}**. Go to the **Weekly Availability Summary** tab to check players in.")
+            st.stop()
 
-    if len(pool_d) > TARGET_D:
-        excess = len(pool_d) - TARGET_D
-        candidates_2nd = pool_d[pool_d['2nd Choice'] == 'F']
-        if len(candidates_2nd) >= excess:
-            conv = candidates_2nd.head(excess)
-        else:
-            rem = excess - len(candidates_2nd)
-            others = pool_d.drop(candidates_2nd.index).tail(rem)
-            conv = pd.concat([candidates_2nd, others])
-        pool_f = pd.concat([pool_f, conv])
-        pool_d = pool_d.drop(conv.index)
-        st.info(f"Balanced Defense (capped at 4 per team): Moved {len(conv)} D -> F: **{', '.join(conv['Full Name'])}**")
+        total = len(available)
+        TARGET_D = 8  # Always balance to 4 Defensemen per team (8 total)
 
-    elif len(pool_d) % 2 == 1 and len(pool_d) > 4:
-        candidates_2nd = pool_d[pool_d['2nd Choice'] == 'F']
-        conv = candidates_2nd.head(1) if not candidates_2nd.empty else pool_d.tail(1)
-        pool_f = pd.concat([pool_f, conv])
-        pool_d = pool_d.drop(conv.index)
-        st.info(f"Evened Defense across teams ({len(pool_d)//2} per team): Moved 1 D -> F: **{', '.join(conv['Full Name'])}**")
-
-    if not pool_other.empty:
-        pool_f = pd.concat([pool_f, pool_other])
-
-    st.info(
-        f"**Strategy ({selected_sheet}):** {total} players -> "
-        f"**{len(pool_d)} Defense** ({len(pool_d)//2} per team) & **{len(pool_f)} Forwards**"
-    )
-
-    # --- BUILD ROSTERS ---
-    ta, tb, cuts_d, cuts_f, rival_logs = build_rosters(pool_d, pool_f, is_wednesday, allow_wed_d_pair=False)
-
-    if is_wednesday:
-        common_cnt = min(len(ta), len(tb))
-        score_gap = abs(get_top_n_score(ta, common_cnt) - get_top_n_score(tb, common_cnt))
-        if score_gap > 1.5:
-            ta_alt, tb_alt, cuts_d_alt, cuts_f_alt, rival_logs_alt = build_rosters(
-                pool_d, pool_f, is_wednesday, allow_wed_d_pair=True
+        missing_pos = available[~available['1st Choice'].isin(['F', 'D'])]
+        if not missing_pos.empty:
+            st.warning(
+                f"⚠️ Missing 1st Choice position for: **{', '.join(missing_pos['Full Name'])}** "
+                "(assigned as Forward; you can set their position in the Summary tab)."
             )
-            alt_gap = abs(get_top_n_score(ta_alt, common_cnt) - get_top_n_score(tb_alt, common_cnt))
-            if alt_gap < score_gap:
-                ta, tb, cuts_d, cuts_f, rival_logs = ta_alt, tb_alt, cuts_d_alt, cuts_f_alt, rival_logs_alt
 
-    # --- UI ---
-    if st.button("🔀 Shuffle Teams Again"):
-        st.session_state.shuffle_seed += 1
-        st.rerun()
+        # --- BIRTHDAY CHECK (Checks all players in Master list) ---
+        bday_msg, bday_names = get_birthday_message(working_df, 'B-day')
+        with st.expander("🎂 Birthday Debugger", expanded=True):
+            today = datetime.now()
+            s_week = today + timedelta(days=1) if today.weekday() == 6 else today - timedelta(days=today.weekday())
+            e_week = s_week + timedelta(days=6)
+            st.write(f"**Scanning Window:** {s_week.strftime('%a %b %d')} — {e_week.strftime('%a %b %d')}")
+            if bday_names:
+                st.success(f"**Birthdays Found:** {', '.join(bday_names)}")
+            else:
+                st.info("No birthdays found this week (checked Master list).")
+            st.caption(f"Checked {len(working_df)} total players in roster.")
 
-    if rival_logs:
-        st.divider()
-        for r in rival_logs:
-            st.success(f"⚖️ {r}")
+        noted_players = available[available['Notes'].fillna('').astype(str).str.strip() != '']
+        if not noted_players.empty:
+            with st.expander(f"📝 Active Player Notes ({len(noted_players)})", expanded=False):
+                for _, nrow in noted_players.iterrows():
+                    st.write(f"- **{nrow['Full Name']}**: {nrow['Notes']}")
 
-    common_count = min(len(ta), len(tb))
-    total_a = ta['Score'].sum()
-    total_b = tb['Score'].sum()
-    fair_a = get_top_n_score(ta, common_count)
-    fair_b = get_top_n_score(tb, common_count)
+        # --- SHUFFLE TIE-BREAKS & SORT POOLS ---
+        available = available.sample(frac=1, random_state=st.session_state.shuffle_seed).reset_index(drop=True)
+        available['Status_Rank'] = available['Reg / Spare'].apply(lambda x: 0 if x == 'R' else 1)
+        available = available.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False], kind='mergesort')
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.header("🔴 Red Team")
-        st.write(f"**Total Score:** {total_a:.1f}")
-        if len(ta) != len(tb):
-            st.write(f"**Top {common_count} Score:** {fair_a:.1f}")
-        st.write(f"Players: {len(ta)} ({len(ta[ta['Position'] == 'D'])} D / {len(ta[ta['Position'] == 'F'])} F)")
-        st.dataframe(ta[['Full Name', 'Position']], hide_index=True)
-    with c2:
-        st.header("⚪ White Team")
-        st.write(f"**Total Score:** {total_b:.1f}")
-        if len(ta) != len(tb):
-            st.write(f"**Top {common_count} Score:** {fair_b:.1f}")
-        st.write(f"Players: {len(tb)} ({len(tb[tb['Position'] == 'D'])} D / {len(tb[tb['Position'] == 'F'])} F)")
-        st.dataframe(tb[['Full Name', 'Position']], hide_index=True)
+        pool_d = available[available['1st Choice'] == 'D'].copy()
+        pool_f = available[available['1st Choice'] == 'F'].copy()
+        pool_other = available[~available['1st Choice'].isin(['D', 'F'])].copy()
 
-    if not cuts_d.empty or not cuts_f.empty:
-        st.error(f"🚫 Cuts: {len(cuts_d)} D, {len(cuts_f)} F")
-        if not cuts_d.empty:
-            st.write(f"D: {', '.join(cuts_d['Full Name'])}")
-        if not cuts_f.empty:
-            st.write(f"F: {', '.join(cuts_f['Full Name'])}")
+        # --- POSITIONAL BALANCER LOGIC (Target 4 D per team = 8 D total) ---
+        if len(pool_d) < TARGET_D:
+            needed = TARGET_D - len(pool_d)
+            candidates = pool_f[pool_f['2nd Choice'] == 'D'].copy()
+            # On Mondays, keep Gary Fera at Forward unless all other F->D options are exhausted
+            if is_monday and not candidates.empty:
+                candidates['Is_Gary'] = candidates['Full Name'].apply(clean_name_key) == clean_name_key("Gary Fera")
+                candidates = candidates.sort_values(
+                    by=['Is_Gary', 'Status_Rank', 'Score'], ascending=[True, True, False], kind='mergesort'
+                ).drop(columns=['Is_Gary'])
 
-    st.divider()
-    all_p = pd.concat([ta, tb])
-    if not all_p.empty:
-        recipients = [e for e in all_p['Email'].unique() if pd.notna(e) and str(e).strip()]
-        bcc = ",".join(recipients)
-        body = (
-            f"{bday_msg}Hello everyone,\n\n"
-            f"Here are the rosters for the upcoming game:\n\n"
-            f"{format_team_list(ta, 'RED TEAM')}\n"
-            f"{format_team_list(tb, 'WHITE TEAM')}\n"
-            f"Keep your sticks on the ice!"
-        )
+            if not candidates.empty:
+                conv = candidates.head(needed)
+                pool_d = pd.concat([pool_d, conv])
+                pool_f = pool_f.drop(conv.index)
+                st.info(f"Balanced Defense (4 per team): Moved {len(conv)} F -> D: **{', '.join(conv['Full Name'])}**")
 
-        st.text_area("Email Draft", value=body, height=300)
-        subj = urllib.parse.quote(f"Bendo Hockey Lineups - {selected_sheet}")
-        safe_body = urllib.parse.quote(body)
-        safe_bcc = urllib.parse.quote(bcc)
-
-        b1, b2, b3 = st.columns(3)
-        b1.link_button("📱 Default App", f"mailto:?bcc={safe_bcc}&subject={subj}&body={safe_body}")
-        b2.link_button("💻 Gmail Web", f"https://mail.google.com/mail/?view=cm&fs=1&bcc={safe_bcc}&su={subj}&body={safe_body}")
-        b3.link_button("🍎 iOS Gmail", f"googlegmail:///co?bcc={safe_bcc}&subject={subj}&body={safe_body}")
+        if len(pool_d) > TARGET_D:
+            excess = len(pool_d) - TARGET_D
+            candidates_2nd = pool_d[pool_d['2nd Choice'] == 'F']
+            if len(candidates_2nd) >= excess:
+                conv = candidates_2nd.head(excess)
+            else:
+                rem = excess - len(candidates_2nd)
+                others = pool_d.drop(candidates_2nd.index).tail(rem)
+                conv = pd.concat([candidates_2nd, others])
+            pool_f = pd.concat([pool_f, conv])
+            pool_d = pool_d.drop(conv.index)
+            st.info(f"Balanced Defense (capped at 4
