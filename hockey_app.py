@@ -10,7 +10,7 @@ st.set_page_config(page_title="Hockey Team Balancer", layout="wide")
 
 # PASTE YOUR GOOGLE SHEET URL BETWEEN THE QUOTES BELOW:
 DEFAULT_GOOGLE_SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE/edit"
+    "https://docs.google.com/spreadsheets/d/11bgbSoRAAL79hYniKkyI4w0wMOAgSSFe/edit?usp=sharing&ouid=114162045734133679348&rtpof=true&sd=true"
 )
 
 if "shuffle_seed" not in st.session_state:
