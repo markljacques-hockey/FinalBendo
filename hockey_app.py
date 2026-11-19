@@ -616,7 +616,6 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
         return pd_p, pf_p
 
     rivals = [
-        ("Mike Tonietto", "Jamie Devin"),
         ("Mark Hicks", "Gary Fera"),
     ]
     pidx = 0
