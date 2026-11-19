@@ -254,8 +254,22 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
         return False, f"Error saving to Google Sheet: {e}"
 
 
-def true_snake_draft(players, pre_a=0, pre_b=0):
-    players = players.reset_index(drop=True)
+def score_aware_snake_draft(
+    players, pre_a_list=None, pre_b_list=None
+):
+    pre_a_list = pre_a_list or []
+    pre_b_list = pre_b_list or []
+    pre_a = len(pre_a_list)
+    pre_b = len(pre_b_list)
+
+    # Sort strictly by Score descending (preserving shuffle tie-breaks via mergesort)
+    if not players.empty:
+        players = players.sort_values(
+            by="Score", ascending=False, kind="mergesort"
+        ).reset_index(drop=True)
+    else:
+        players = players.reset_index(drop=True)
+
     mirror = pre_b > pre_a
     start = pre_a + pre_b
     list_a, list_b = [], []
@@ -269,6 +283,36 @@ def true_snake_draft(players, pre_a=0, pre_b=0):
             list_a.append(players.iloc[i])
         else:
             list_b.append(players.iloc[i])
+
+    # Score-aware swap optimization within this position
+    # (only swaps drafted players, keeping pre-assigned rivals locked)
+    score_pre_a = sum(float(p["Score"]) for p in pre_a_list)
+    score_pre_b = sum(float(p["Score"]) for p in pre_b_list)
+
+    improved = True
+    while improved and list_a and list_b:
+        improved = False
+        cur_a = score_pre_a + sum(float(r["Score"]) for r in list_a)
+        cur_b = score_pre_b + sum(float(r["Score"]) for r in list_b)
+        cur_diff = abs(cur_a - cur_b)
+        if cur_diff <= 0.01:
+            break
+
+        best_diff = cur_diff
+        best_pair = None
+        for idx_a, ra in enumerate(list_a):
+            sa = float(ra["Score"])
+            for idx_b, rb in enumerate(list_b):
+                sb = float(rb["Score"])
+                new_diff = abs((cur_a - sa + sb) - (cur_b - sb + sa))
+                if new_diff + 1e-6 < best_diff:
+                    best_diff = new_diff
+                    best_pair = (idx_a, idx_b)
+
+        if best_pair is not None:
+            ia, ib = best_pair
+            list_a[ia], list_b[ib] = list_b[ib], list_a[ia]
+            improved = True
 
     cols = players.columns
     df_a = (
@@ -751,8 +795,13 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
     for p in pre_a + pre_b:
         p["Position"] = p["Assigned_Pos"]
 
-    da, db = true_snake_draft(sel_d, pre_da, pre_db)
-    fa, fb = true_snake_draft(sel_f, pre_fa, pre_fb)
+    pre_d_a = [p for p in pre_a if p["Assigned_Pos"] == "D"]
+    pre_d_b = [p for p in pre_b if p["Assigned_Pos"] == "D"]
+    pre_f_a = [p for p in pre_a if p["Assigned_Pos"] == "F"]
+    pre_f_b = [p for p in pre_b if p["Assigned_Pos"] == "F"]
+
+    da, db = score_aware_snake_draft(sel_d, pre_d_a, pre_d_b)
+    fa, fb = score_aware_snake_draft(sel_f, pre_f_a, pre_f_b)
 
     cols = [
         "Full Name",
@@ -1315,6 +1364,10 @@ if all_sheets is not None:
         tot_b = tb["Score"].sum()
         fair_a = get_top_n_score(ta, c_cnt)
         fair_b = get_top_n_score(tb, c_cnt)
+        def_a = ta[ta["Position"] == "D"]["Score"].sum()
+        fwd_a = ta[ta["Position"] == "F"]["Score"].sum()
+        def_b = tb[tb["Position"] == "D"]["Score"].sum()
+        fwd_b = tb[tb["Position"] == "F"]["Score"].sum()
 
         c1, c2 = st.columns(2)
         with c1:
@@ -1322,6 +1375,10 @@ if all_sheets is not None:
             st.write(f"**Total Score:** {tot_a:.1f}")
             if len(ta) != len(tb):
                 st.write(f"**Top {c_cnt} Score:** {fair_a:.1f}")
+            st.write(
+                f"**Defense Score:** {def_a:.1f} | "
+                f"**Forward Score:** {fwd_a:.1f}"
+            )
             da_n = len(ta[ta["Position"] == "D"])
             fa_n = len(ta[ta["Position"] == "F"])
             st.write(f"Players: {len(ta)} ({da_n} D / {fa_n} F)")
@@ -1337,6 +1394,10 @@ if all_sheets is not None:
             st.write(f"**Total Score:** {tot_b:.1f}")
             if len(ta) != len(tb):
                 st.write(f"**Top {c_cnt} Score:** {fair_b:.1f}")
+            st.write(
+                f"**Defense Score:** {def_b:.1f} | "
+                f"**Forward Score:** {fwd_b:.1f}"
+            )
             db_n = len(tb[tb["Position"] == "D"])
             fb_n = len(tb[tb["Position"] == "F"])
             st.write(f"Players: {len(tb)} ({db_n} D / {fb_n} F)")
