@@ -850,12 +850,13 @@ if all_sheets is not None:
         styled_summary = style_spare_rows(
             st.session_state.summary_df, disp_cols
         )
+        h_sum = (len(st.session_state.summary_df) + 1) * 35 + 3
         edited = st.data_editor(
             styled_summary,
             column_config=cfg,
             hide_index=True,
             use_container_width=True,
-            height=600,
+            height=h_sum,
             key="attendance_editor",
         )
 
@@ -1156,10 +1157,12 @@ if all_sheets is not None:
             da_n = len(ta[ta["Position"] == "D"])
             fa_n = len(ta[ta["Position"] == "F"])
             st.write(f"Players: {len(ta)} ({da_n} D / {fa_n} F)")
+            h_a = (len(ta) + 1) * 35 + 3
             st.dataframe(
                 style_spare_rows(ta, ["Full Name", "Position"]),
                 hide_index=True,
                 use_container_width=True,
+                height=h_a,
             )
         with c2:
             st.header("⚪ White Team")
@@ -1169,10 +1172,12 @@ if all_sheets is not None:
             db_n = len(tb[tb["Position"] == "D"])
             fb_n = len(tb[tb["Position"] == "F"])
             st.write(f"Players: {len(tb)} ({db_n} D / {fb_n} F)")
+            h_b = (len(tb) + 1) * 35 + 3
             st.dataframe(
                 style_spare_rows(tb, ["Full Name", "Position"]),
                 hide_index=True,
                 use_container_width=True,
+                height=h_b,
             )
 
         if not cuts_d.empty or not cuts_f.empty:
