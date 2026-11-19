@@ -1231,10 +1231,15 @@ if all_sheets is not None:
             pool_f = pd.concat([pool_f, pool_oth])
 
         d_each = len(pool_d) // 2
+        f_each_str = (
+            f"{len(pool_f) // 2} per team"
+            if len(pool_f) % 2 == 0
+            else f"{(len(pool_f) + 1) // 2} / {len(pool_f) // 2} per team"
+        )
         st.info(
             f"**Strategy ({sel_day}):** {total} players -> "
             f"**{len(pool_d)} Defense** ({d_each} per team) & "
-            f"**{len(pool_f)} Forwards**"
+            f"**{len(pool_f)} Forwards** ({f_each_str})"
         )
 
         ta, tb, cuts_d, cuts_f, rival_logs = build_rosters(
