@@ -311,7 +311,22 @@ def clean_name_key(name):
     return str(name).lower().replace(" ", "").strip()
 
 
-def format_sms_link(phone_val):
+def get_first_name(full_name):
+    if pd.isna(full_name):
+        return ""
+    parts = str(full_name).strip().split()
+    return parts[0] if parts else ""
+
+
+def build_invite_sms_text(first_name, game_day):
+    return (
+        f"Hi {first_name}. Are you available to play {game_day} at WFCU "
+        f"at 8:50 a.m.? Let me know ASAP please so I know if I have to "
+        f"get anyone else. Thanks"
+    )
+
+
+def format_sms_link(phone_val, body_text=""):
     if pd.isna(phone_val):
         return ""
     raw = str(phone_val).strip()
@@ -326,6 +341,9 @@ def format_sms_link(phone_val):
         sms_num = f"+{digits}"
     else:
         sms_num = f"+{digits}"
+    if body_text:
+        enc_body = urllib.parse.quote(body_text)
+        return f"sms:{sms_num}?&body={enc_body}"
     return f"sms:{sms_num}"
 
 
@@ -832,7 +850,7 @@ if all_sheets is not None:
         st.subheader("Master Roster & Game-Day Availability")
         st.write(
             "Check or uncheck who is playing on each day below. "
-            "Tap a phone number to text, or use the quick text launcher below."
+            "Select the game day below to pre-fill the SMS invite when tapping any phone number."
         )
 
         m_cols = st.columns(len(valid_sheets))
@@ -840,9 +858,20 @@ if all_sheets is not None:
             cnt = int(st.session_state.summary_df[day].sum())
             m_cols[idx].metric(label=f"{day} Players In", value=cnt)
 
-        # Build clickable SMS link column for the table
+        sms_day = st.selectbox(
+            "Game Day for SMS Text Invite:",
+            valid_sheets,
+            key="sms_target_day",
+        )
+
+        # Build clickable SMS link column with personalized pre-filled invite
+        def make_row_sms(row):
+            fn = get_first_name(row["Full Name"])
+            msg = build_invite_sms_text(fn, sms_day)
+            return format_sms_link(row["Phone"], msg)
+
         st.session_state.summary_df["SMS_Link"] = (
-            st.session_state.summary_df["Phone"].apply(format_sms_link)
+            st.session_state.summary_df.apply(make_row_sms, axis=1)
         )
 
         disp_cols = (
@@ -866,7 +895,7 @@ if all_sheets is not None:
             ),
             "SMS_Link": st.column_config.LinkColumn(
                 "Phone (Tap to Text)",
-                help="Tap to open SMS / Messages on your phone",
+                help="Tap to open SMS / Messages with pre-filled game invite",
                 display_text=r"sms:\+?1?(\d{3})(\d{3})(\d{4})",
                 disabled=True,
             ),
@@ -947,24 +976,26 @@ if all_sheets is not None:
                 for _, pr in phone_players.iterrows():
                     disp_p = format_phone_display(pr["Phone"])
                     lbl = f"{pr['Full Name']} ({pr['Reg / Spare']}) — {disp_p}"
-                    p_options[lbl] = (pr["Full Name"], pr["SMS_Link"])
+                    p_options[lbl] = (pr["Full Name"], pr["Phone"])
 
                 sel_p_lbl = st.selectbox(
                     "Select Player to Text:",
                     list(p_options.keys()),
                     key="quick_sms_player",
                 )
-                sms_txt = st.text_input(
-                    "Optional Pre-filled Message:",
-                    value="Hey, can you play hockey this week?",
-                    key="quick_sms_body",
+                target_nm, target_phone = p_options[sel_p_lbl]
+                default_invite = build_invite_sms_text(
+                    get_first_name(target_nm), sms_day
                 )
-                target_nm, base_sms = p_options[sel_p_lbl]
-                if sms_txt.strip():
-                    enc_msg = urllib.parse.quote(sms_txt.strip())
-                    full_sms_url = f"{base_sms}?&body={enc_msg}"
-                else:
-                    full_sms_url = base_sms
+                sms_txt = st.text_area(
+                    "Message Preview (editable):",
+                    value=default_invite,
+                    height=90,
+                    key=f"quick_sms_body_{clean_name_key(target_nm)}_{sms_day}",
+                )
+                full_sms_url = format_sms_link(
+                    target_phone, sms_txt.strip()
+                )
                 st.link_button(
                     f"💬 Send Text Message to {target_nm}",
                     full_sms_url,
