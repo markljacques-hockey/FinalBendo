@@ -948,7 +948,7 @@ if all_sheets is not None:
             "SMS_Link": st.column_config.LinkColumn(
                 "Phone (Tap to Text)",
                 help="Tap to open SMS / Messages with pre-filled game invite",
-                display_text=r"sms:\+?1?(\d{3})(\d{3})(\d{4})",
+                display_text=r"sms:\+?1?(\d{7,15})",
                 disabled=True,
             ),
             "1st Choice": st.column_config.SelectboxColumn(
