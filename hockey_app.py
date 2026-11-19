@@ -850,7 +850,7 @@ if all_sheets is not None:
         st.subheader("Master Roster & Game-Day Availability")
         st.write(
             "Check or uncheck who is playing on each day below. "
-            "Select the game day below to pre-fill the SMS invite when tapping any phone number."
+            "Tap any phone number to text, or use the quick text launcher below."
         )
 
         m_cols = st.columns(len(valid_sheets))
@@ -858,11 +858,10 @@ if all_sheets is not None:
             cnt = int(st.session_state.summary_df[day].sum())
             m_cols[idx].metric(label=f"{day} Players In", value=cnt)
 
-        sms_day = st.selectbox(
-            "Game Day for SMS Text Invite:",
-            valid_sheets,
-            key="sms_target_day",
-        )
+        # Read selected SMS day from session state (defaults to first valid sheet)
+        sms_day = st.session_state.get("sms_target_day", valid_sheets[0])
+        if sms_day not in valid_sheets:
+            sms_day = valid_sheets[0]
 
         # Build clickable SMS link column with personalized pre-filled invite
         def make_row_sms(row):
@@ -966,6 +965,12 @@ if all_sheets is not None:
                     all_sheets, valid_sheets, master_name
                 )
                 st.rerun()
+
+        sms_day = st.selectbox(
+            "Game Day for SMS Text Invite:",
+            valid_sheets,
+            key="sms_target_day",
+        )
 
         with st.expander("📱 Quick Text / Edit Phone Numbers", expanded=False):
             phone_players = st.session_state.summary_df[
