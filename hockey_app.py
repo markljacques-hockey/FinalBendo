@@ -137,6 +137,7 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
             idx_score = find_idx(["score", "rating", "skill"])
             idx_reg = find_idx(["reg/spare", "status"])
             idx_notes = find_idx(["notes", "note"])
+            idx_phone = find_idx(["phone", "phonenumber", "cell", "mobile"])
 
             if idx_avail is None:
                 continue
@@ -196,6 +197,7 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
                     (idx_2nd, str(s_row["2nd Choice"]).strip()),
                     (idx_reg, str(s_row["Reg / Spare"]).strip()),
                     (idx_notes, str(s_row["Notes"]).strip()),
+                    (idx_phone, str(s_row["Phone"]).strip()),
                 ]
                 for c_idx, new_v in field_pairs:
                     if c_idx is not None:
@@ -309,6 +311,38 @@ def clean_name_key(name):
     return str(name).lower().replace(" ", "").strip()
 
 
+def format_sms_link(phone_val):
+    if pd.isna(phone_val):
+        return ""
+    raw = str(phone_val).strip()
+    if not raw or raw.lower() == "nan":
+        return ""
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return ""
+    if len(digits) == 10:
+        sms_num = f"+1{digits}"
+    elif len(digits) == 11 and digits.startswith("1"):
+        sms_num = f"+{digits}"
+    else:
+        sms_num = f"+{digits}"
+    return f"sms:{sms_num}"
+
+
+def format_phone_display(phone_val):
+    if pd.isna(phone_val):
+        return ""
+    raw = str(phone_val).strip()
+    if not raw or raw.lower() == "nan":
+        return ""
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
+    return raw
+
+
 def style_spare_rows(df, disp_cols):
     if df.empty or "Reg / Spare" not in df.columns:
         return df[disp_cols]
@@ -371,7 +405,7 @@ def extract_clean_sheet_df(raw_df, is_master=False):
     c_email = find_col(df, ["email", "e-mail"])
     c_reg = find_col(df, ["reg / spare", "reg/spare", "status"])
     c_notes = find_col(df, ["notes", "note"])
-    c_phone = find_col(df, ["phone", "phone number"])
+    c_phone = find_col(df, ["phone", "phone number", "cell", "mobile"])
     c_days = find_col(df, ["days", "day"])
     c_bday = find_col(df, ["b-day", "bday", "birthday", "dob"])
 
@@ -798,7 +832,7 @@ if all_sheets is not None:
         st.subheader("Master Roster & Game-Day Availability")
         st.write(
             "Check or uncheck who is playing on each day below. "
-            "Changes update the **Generate Day Lineups** tab."
+            "Tap a phone number to text, or use the quick text launcher below."
         )
 
         m_cols = st.columns(len(valid_sheets))
@@ -806,10 +840,15 @@ if all_sheets is not None:
             cnt = int(st.session_state.summary_df[day].sum())
             m_cols[idx].metric(label=f"{day} Players In", value=cnt)
 
+        # Build clickable SMS link column for the table
+        st.session_state.summary_df["SMS_Link"] = (
+            st.session_state.summary_df["Phone"].apply(format_sms_link)
+        )
+
         disp_cols = (
             ["Full Name", "Reg / Spare", "Days"]
             + valid_sheets
-            + ["1st Choice", "2nd Choice", "Score", "Notes"]
+            + ["SMS_Link", "1st Choice", "2nd Choice", "Score", "Notes"]
         )
 
         cfg = {
@@ -824,6 +863,12 @@ if all_sheets is not None:
                 help="M = Monday, MW = Mon & Wed, W = Wednesday",
                 options=["M", "MW", "W", ""],
                 width="small",
+            ),
+            "SMS_Link": st.column_config.LinkColumn(
+                "Phone (Tap to Text)",
+                help="Tap to open SMS / Messages on your phone",
+                display_text=r"sms:\+?1?(\d{3})(\d{3})(\d{4})",
+                disabled=True,
             ),
             "1st Choice": st.column_config.SelectboxColumn(
                 "1st Choice", options=["F", "D", ""], width="small"
@@ -860,7 +905,8 @@ if all_sheets is not None:
             key="attendance_editor",
         )
 
-        for col in disp_cols:
+        editable_cols = [c for c in disp_cols if c != "SMS_Link"]
+        for col in editable_cols:
             st.session_state.summary_df[col] = edited[col]
 
         btn_c1, btn_c2 = st.columns([2, 2])
@@ -891,6 +937,52 @@ if all_sheets is not None:
                     all_sheets, valid_sheets, master_name
                 )
                 st.rerun()
+
+        with st.expander("📱 Quick Text / Edit Phone Numbers", expanded=False):
+            phone_players = st.session_state.summary_df[
+                st.session_state.summary_df["SMS_Link"] != ""
+            ].copy()
+            if not phone_players.empty:
+                p_options = {}
+                for _, pr in phone_players.iterrows():
+                    disp_p = format_phone_display(pr["Phone"])
+                    lbl = f"{pr['Full Name']} ({pr['Reg / Spare']}) — {disp_p}"
+                    p_options[lbl] = (pr["Full Name"], pr["SMS_Link"])
+
+                sel_p_lbl = st.selectbox(
+                    "Select Player to Text:",
+                    list(p_options.keys()),
+                    key="quick_sms_player",
+                )
+                sms_txt = st.text_input(
+                    "Optional Pre-filled Message:",
+                    value="Hey, can you play hockey this week?",
+                    key="quick_sms_body",
+                )
+                target_nm, base_sms = p_options[sel_p_lbl]
+                if sms_txt.strip():
+                    enc_msg = urllib.parse.quote(sms_txt.strip())
+                    full_sms_url = f"{base_sms}?&body={enc_msg}"
+                else:
+                    full_sms_url = base_sms
+                st.link_button(
+                    f"💬 Send Text Message to {target_nm}",
+                    full_sms_url,
+                    use_container_width=True,
+                )
+
+            st.caption("Edit raw phone numbers below if needed (click Save Changes above to sync):")
+            phone_edit_df = st.data_editor(
+                st.session_state.summary_df[["Full Name", "Phone"]],
+                column_config={
+                    "Full Name": st.column_config.TextColumn("Player Name", disabled=True),
+                    "Phone": st.column_config.TextColumn("Phone Number"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="phone_number_editor",
+            )
+            st.session_state.summary_df["Phone"] = phone_edit_df["Phone"]
 
     with tab_gen:
         sel_day = st.selectbox(
