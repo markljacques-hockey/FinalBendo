@@ -4,7 +4,15 @@ import urllib.parse
 import urllib.request
 import io
 import re
+import json
 from datetime import datetime, timedelta
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    HAS_GSPREAD = True
+except ImportError:
+    HAS_GSPREAD = False
 
 st.set_page_config(page_title="Hockey Team Balancer", layout="wide")
 
@@ -15,6 +23,30 @@ DEFAULT_GOOGLE_SHEET_URL = (
 
 if "shuffle_seed" not in st.session_state:
     st.session_state.shuffle_seed = 0
+
+
+def get_gspread_client():
+    if not HAS_GSPREAD:
+        return None, "gspread library not installed."
+    if "gcp_service_account" not in st.secrets:
+        return None, "gcp_service_account not found in Streamlit Secrets."
+    try:
+        raw_secret = st.secrets["gcp_service_account"]
+        if isinstance(raw_secret, str):
+            creds_dict = json.loads(raw_secret)
+        else:
+            creds_dict = dict(raw_secret)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(
+            creds_dict, scopes=scopes
+        )
+        client = gspread.authorize(creds)
+        return client, None
+    except Exception as e:
+        return None, f"Service account auth error: {e}"
 
 
 @st.cache_data(ttl=60)
@@ -43,6 +75,152 @@ def load_google_sheet_data(sheet_url):
             "is set to 'Anyone with the link can view'."
         )
         return None, msg
+
+
+def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
+    client, err = get_gspread_client()
+    if err:
+        return False, err
+
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", sheet_url)
+    if not m:
+        return False, "Invalid Google Sheets URL."
+    sid = m.group(1)
+
+    try:
+        spreadsheet = client.open_by_key(sid)
+        summary_map = {}
+        for _, r in summary_df.iterrows():
+            summary_map[r["Key"]] = r
+
+        updated_tabs = []
+        for day in valid_sheets:
+            try:
+                ws = spreadsheet.worksheet(day)
+            except Exception:
+                continue
+
+            all_vals = ws.get_all_values()
+            if len(all_vals) < 3:
+                continue
+
+            # Row 2 (index 1) is the header row
+            headers = all_vals[1]
+            norm_h = ["".join(str(h).lower().split()) for h in headers]
+
+            def find_idx(targets):
+                for t in targets:
+                    if t in norm_h:
+                        return norm_h.index(t)
+                return None
+
+            idx_avail = find_idx(["availability", "avail"])
+            idx_name = find_idx(["name", "fullname"])
+            idx_first = find_idx(["first_name", "firstname"])
+            idx_last = find_idx(["last_name", "lastname"])
+            idx_1st = find_idx(["1stchoice", "position"])
+            idx_2nd = find_idx(["2ndchoice"])
+            idx_score = find_idx(["score", "rating", "skill"])
+            idx_reg = find_idx(["reg/spare", "status"])
+            idx_notes = find_idx(["notes", "note"])
+
+            if idx_avail is None:
+                continue
+
+            cells_to_update = []
+            for r_idx in range(2, len(all_vals)):
+                row_vals = all_vals[r_idx]
+                full_nm = ""
+                if idx_name is not None and idx_name < len(row_vals):
+                    full_nm = str(row_vals[idx_name]).strip()
+                if (
+                    not full_nm
+                    and idx_first is not None
+                    and idx_last is not None
+                ):
+                    fp = (
+                        str(row_vals[idx_first]).strip()
+                        if idx_first < len(row_vals)
+                        else ""
+                    )
+                    lp = (
+                        str(row_vals[idx_last]).strip()
+                        if idx_last < len(row_vals)
+                        else ""
+                    )
+                    full_nm = f"{fp} {lp}".strip()
+
+                if not full_nm:
+                    continue
+
+                k = clean_name_key(full_nm)
+                if k not in summary_map:
+                    continue
+
+                s_row = summary_map[k]
+                sheet_row_num = r_idx + 1
+
+                new_avail = "Y" if bool(s_row[day]) else "N"
+                cur_avail = (
+                    str(row_vals[idx_avail]).strip().upper()
+                    if idx_avail < len(row_vals)
+                    else ""
+                )
+                cur_bool = cur_avail.startswith("Y")
+                if bool(s_row[day]) != cur_bool:
+                    cells_to_update.append(
+                        gspread.Cell(
+                            sheet_row_num, idx_avail + 1, new_avail
+                        )
+                    )
+
+                field_pairs = [
+                    (idx_1st, str(s_row["1st Choice"]).strip()),
+                    (idx_2nd, str(s_row["2nd Choice"]).strip()),
+                    (idx_reg, str(s_row["Reg / Spare"]).strip()),
+                    (idx_notes, str(s_row["Notes"]).strip()),
+                ]
+                for c_idx, new_v in field_pairs:
+                    if c_idx is not None:
+                        old_v = (
+                            str(row_vals[c_idx]).strip()
+                            if c_idx < len(row_vals)
+                            else ""
+                        )
+                        if new_v != old_v:
+                            cells_to_update.append(
+                                gspread.Cell(
+                                    sheet_row_num, c_idx + 1, new_v
+                                )
+                            )
+
+                if idx_score is not None:
+                    new_sc = float(s_row["Score"])
+                    old_raw = (
+                        str(row_vals[idx_score]).strip()
+                        if idx_score < len(row_vals)
+                        else ""
+                    )
+                    try:
+                        old_sc = float(old_raw) if old_raw else 0.0
+                    except ValueError:
+                        old_sc = -1.0
+                    if abs(new_sc - old_sc) > 0.01:
+                        cells_to_update.append(
+                            gspread.Cell(
+                                sheet_row_num, idx_score + 1, new_sc
+                            )
+                        )
+
+            if cells_to_update:
+                ws.update_cells(cells_to_update)
+                updated_tabs.append(f"{day} ({len(cells_to_update)})")
+
+        if updated_tabs:
+            return True, f"Saved updates to: {', '.join(updated_tabs)}"
+        return True, "Google Sheet is already up to date!"
+    except Exception as e:
+        return False, f"Error saving to Google Sheet: {e}"
 
 
 def true_snake_draft(players, pre_a=0, pre_b=0):
@@ -629,11 +807,34 @@ if all_sheets is not None:
         for col in disp_cols:
             st.session_state.summary_df[col] = edited[col]
 
-        if st.button("↩️ Reset Checkboxes to Sheet Defaults"):
-            st.session_state.summary_df = build_summary_table(
-                all_sheets, valid_sheets, master_name
-            )
-            st.rerun()
+        btn_c1, btn_c2 = st.columns([2, 2])
+        with btn_c1:
+            if st.button(
+                "💾 Save Changes to Google Sheet",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("Saving to Google Sheets..."):
+                    ok, msg = save_changes_to_google_sheet(
+                        sheet_url.strip(),
+                        st.session_state.summary_df,
+                        valid_sheets,
+                    )
+                if ok:
+                    load_google_sheet_data.clear()
+                    st.success(f"✅ {msg}")
+                else:
+                    st.error(f"❌ {msg}")
+
+        with btn_c2:
+            if st.button(
+                "↩️ Reset Checkboxes to Sheet Defaults",
+                use_container_width=True,
+            ):
+                st.session_state.summary_df = build_summary_table(
+                    all_sheets, valid_sheets, master_name
+                )
+                st.rerun()
 
     with tab_gen:
         sel_day = st.selectbox(
