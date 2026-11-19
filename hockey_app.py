@@ -771,13 +771,33 @@ if all_sheets is not None:
 
         if len(pool_d) > TARGET_D:
             excess = len(pool_d) - TARGET_D
-            c_2nd = pool_d[pool_d["2nd Choice"] == "F"]
+            c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
+            if is_wed and not c_2nd.empty:
+                c_2nd["Is_Gary"] = (
+                    c_2nd["Full Name"].apply(clean_name_key)
+                    == clean_name_key("Gary Fera")
+                )
+                c_2nd = c_2nd.sort_values(
+                    by=["Is_Gary", "Status_Rank", "Score"],
+                    ascending=[True, True, False],
+                    kind="mergesort",
+                ).drop(columns=["Is_Gary"])
             if len(c_2nd) >= excess:
                 conv = c_2nd.head(excess)
             else:
                 rem = excess - len(c_2nd)
-                oth = pool_d.drop(c_2nd.index).tail(rem)
-                conv = pd.concat([c_2nd, oth])
+                oth = pool_d.drop(c_2nd.index).copy()
+                if is_wed and not oth.empty:
+                    oth["Is_Gary"] = (
+                        oth["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    oth = oth.sort_values(
+                        by=["Is_Gary", "Status_Rank", "Score"],
+                        ascending=[True, True, False],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+                conv = pd.concat([c_2nd, oth.tail(rem)])
             pool_f = pd.concat([pool_f, conv])
             pool_d = pool_d.drop(conv.index)
             mv = ", ".join(conv["Full Name"])
@@ -787,10 +807,32 @@ if all_sheets is not None:
             )
 
         elif len(pool_d) % 2 == 1 and len(pool_d) > 4:
-            c_2nd = pool_d[pool_d["2nd Choice"] == "F"]
-            conv = (
-                c_2nd.head(1) if not c_2nd.empty else pool_d.tail(1)
-            )
+            c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
+            if is_wed and not c_2nd.empty:
+                c_2nd["Is_Gary"] = (
+                    c_2nd["Full Name"].apply(clean_name_key)
+                    == clean_name_key("Gary Fera")
+                )
+                c_2nd = c_2nd.sort_values(
+                    by=["Is_Gary", "Status_Rank", "Score"],
+                    ascending=[True, True, False],
+                    kind="mergesort",
+                ).drop(columns=["Is_Gary"])
+            if not c_2nd.empty:
+                conv = c_2nd.head(1)
+            else:
+                oth = pool_d.copy()
+                if is_wed:
+                    oth["Is_Gary"] = (
+                        oth["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    oth = oth.sort_values(
+                        by=["Is_Gary", "Status_Rank", "Score"],
+                        ascending=[True, True, False],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+                conv = oth.tail(1)
             pool_f = pd.concat([pool_f, conv])
             pool_d = pool_d.drop(conv.index)
             mv = ", ".join(conv["Full Name"])
