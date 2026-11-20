@@ -548,7 +548,7 @@ def build_summary_table(all_sheets, valid_sheets, master_name):
             if k not in players:
                 reg = (
                     r["Reg / Spare"]
-                    if r["Reg / Spare"] in ["R", "S"]
+                    if r["Reg / Spare"] in ["R", "S", "IR"]
                     else "S"
                 )
                 row_obj = {
@@ -578,7 +578,7 @@ def build_summary_table(all_sheets, valid_sheets, master_name):
             if k not in players:
                 reg = (
                     r["Reg / Spare"]
-                    if r["Reg / Spare"] in ["R", "S"]
+                    if r["Reg / Spare"] in ["R", "S", "IR"]
                     else "S"
                 )
                 row_obj = {
@@ -616,7 +616,7 @@ def build_summary_table(all_sheets, valid_sheets, master_name):
     out = pd.DataFrame(list(players.values()))
     if not out.empty:
         out["Sort_R"] = out["Reg / Spare"].apply(
-            lambda x: 0 if x == "R" else 1
+            lambda x: 0 if x == "R" else (1 if x == "S" else 2)
         )
         out = (
             out.sort_values(by=["Sort_R", "Full Name"])
@@ -937,7 +937,7 @@ if all_sheets is not None:
                 "Player Name", disabled=True
             ),
             "Reg / Spare": st.column_config.SelectboxColumn(
-                "Reg / Spare", options=["R", "S"], width="small"
+                "Reg / Spare", options=["R", "S", "IR"], width="small"
             ),
             "Days": st.column_config.SelectboxColumn(
                 "Days",
@@ -1169,7 +1169,7 @@ if all_sheets is not None:
             frac=1, random_state=st.session_state.shuffle_seed
         ).reset_index(drop=True)
         avail["Status_Rank"] = avail["Reg / Spare"].apply(
-            lambda x: 0 if x == "R" else 1
+            lambda x: 0 if x == "R" else (1 if x == "S" else 2)
         )
         avail = avail.sort_values(
             by=["Status_Rank", "Score"],
