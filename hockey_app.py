@@ -1456,49 +1456,6 @@ if all_sheets is not None:
                         f"{len(conv_f)} D -> F: **{mv}**"
                     )
 
-        # 3. On Shuffle (seed > 0), if no forced position imbalance occurred, allow
-        #    two-way D/F players (1st=D, 2nd=F paired with 1st=F, 2nd=D) to rotate
-        #    positions so versatile skaters get mixed between D and F across shuffles!
-        if seed > 0 and not moved_f_to_d and not moved_d_to_f:
-            flex_d = pool_d[pool_d["2nd Choice"] == "F"].copy()
-            flex_f = pool_f[pool_f["2nd Choice"] == "D"].copy()
-            if is_wed and not flex_d.empty:
-                flex_d = flex_d[
-                    flex_d["Full Name"].apply(clean_name_key)
-                    != clean_name_key("Gary Fera")
-                ]
-            if is_mon and not flex_f.empty:
-                flex_f = flex_f[
-                    flex_f["Full Name"].apply(clean_name_key)
-                    != clean_name_key("Gary Fera")
-                ]
-            # Keep Regulars prioritized for active spots
-            flex_d = flex_d[flex_d["Status_Rank"] == 0]
-            flex_f = flex_f[flex_f["Status_Rank"] == 0]
-
-            if not flex_d.empty and not flex_f.empty:
-                rng_pos = random.Random(seed + 101)
-                max_pairs = min(len(flex_d), len(flex_f), 2)
-                num_swap = rng_pos.randint(1, max_pairs)
-                d_to_f = flex_d.sample(
-                    n=num_swap, random_state=seed + 102
-                )
-                f_to_d = flex_f.sample(
-                    n=num_swap, random_state=seed + 103
-                )
-                pool_d = pd.concat(
-                    [pool_d.drop(d_to_f.index), f_to_d]
-                )
-                pool_f = pd.concat(
-                    [pool_f.drop(f_to_d.index), d_to_f]
-                )
-                d_names = ", ".join(d_to_f["Full Name"])
-                f_names = ", ".join(f_to_d["Full Name"])
-                st.info(
-                    f"Rotated Two-Way Skaters: **{d_names}** (D -> F) & "
-                    f"**{f_names}** (F -> D)"
-                )
-
         d_each_str = (
             f"{len(pool_d) // 2} per team"
             if len(pool_d) % 2 == 0
