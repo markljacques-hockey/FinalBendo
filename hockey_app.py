@@ -5,6 +5,7 @@ import urllib.request
 import io
 import re
 import json
+import random
 from datetime import datetime, timedelta
 
 try:
@@ -255,16 +256,20 @@ def save_changes_to_google_sheet(sheet_url, summary_df, valid_sheets):
 
 
 def score_aware_snake_draft(
-    players, pre_a_list=None, pre_b_list=None
+    players, pre_a_list=None, pre_b_list=None, seed=0
 ):
     pre_a_list = pre_a_list or []
     pre_b_list = pre_b_list or []
     pre_a = len(pre_a_list)
     pre_b = len(pre_b_list)
+    rng = random.Random(seed)
 
-    # Sort strictly by Score descending (preserving shuffle tie-breaks via mergesort)
+    # Sort by Score descending, breaking ties randomly via seed
     if not players.empty:
-        players = players.sort_values(
+        shuffled = players.sample(frac=1, random_state=seed).reset_index(
+            drop=True
+        )
+        players = shuffled.sort_values(
             by="Score", ascending=False, kind="mergesort"
         ).reset_index(drop=True)
     else:
@@ -274,25 +279,58 @@ def score_aware_snake_draft(
     start = pre_a + pre_b
     list_a, list_b = [], []
 
-    for i in range(len(players)):
-        slot = start + i
-        pick_a = (slot % 4 == 0) or (slot % 4 == 3)
-        if mirror:
-            pick_a = not pick_a
-        if pick_a:
-            list_a.append(players.iloc[i])
+    # Pairwise randomized snake draft:
+    # Pair players in skill tiers (0-1, 2-3, 4-5...) and randomly assign
+    # who gets the higher vs lower pick in each tier when seed > 0 so
+    # repeated shuffles produce genuinely varied, well-balanced lineups.
+    idx = 0
+    n_p = len(players)
+    while idx < n_p:
+        if idx + 1 < n_p:
+            slot = start + idx
+            default_a_first = (slot % 4 == 0) or (slot % 4 == 3)
+            if mirror:
+                default_a_first = not default_a_first
+            a_gets_first = (
+                rng.choice([True, False]) if seed > 0 else default_a_first
+            )
+            if a_gets_first:
+                list_a.append(players.iloc[idx])
+                list_b.append(players.iloc[idx + 1])
+            else:
+                list_b.append(players.iloc[idx])
+                list_a.append(players.iloc[idx + 1])
+            idx += 2
         else:
-            list_b.append(players.iloc[i])
+            # Odd leftover player goes to whichever team currently has fewer at this position
+            tot_a = pre_a + len(list_a)
+            tot_b = pre_b + len(list_b)
+            if tot_a < tot_b:
+                list_a.append(players.iloc[idx])
+            elif tot_b < tot_a:
+                list_b.append(players.iloc[idx])
+            else:
+                if rng.choice([True, False]) if seed > 0 else True:
+                    list_a.append(players.iloc[idx])
+                else:
+                    list_b.append(players.iloc[idx])
+            idx += 1
 
     # Score-aware swap optimization within this position
     # (only swaps drafted players, keeping pre-assigned rivals locked)
     pre_scores_a = [float(p["Score"]) for p in pre_a_list]
     pre_scores_b = [float(p["Score"]) for p in pre_b_list]
-    n_compare = min(len(pre_scores_a) + len(list_a), len(pre_scores_b) + len(list_b))
+    n_compare = min(
+        len(pre_scores_a) + len(list_a), len(pre_scores_b) + len(list_b)
+    )
 
     def pos_gap(la, lb):
-        sa_all = sorted(pre_scores_a + [float(r["Score"]) for r in la], reverse=True)
-        sb_all = sorted(pre_scores_b + [float(r["Score"]) for r in lb], reverse=True)
+        sa_all = sorted(
+            pre_scores_a + [float(r["Score"]) for r in la], reverse=True
+        )
+        sb_all = sorted(
+            pre_scores_b + [float(r["Score"]) for r in lb], reverse=True
+        )
         return abs(sum(sa_all[:n_compare]) - sum(sb_all[:n_compare]))
 
     improved = True
@@ -303,7 +341,7 @@ def score_aware_snake_draft(
             break
 
         best_diff = cur_diff
-        best_pair = None
+        candidates = []
         for idx_a in range(len(list_a)):
             for idx_b in range(len(list_b)):
                 list_a[idx_a], list_b[idx_b] = list_b[idx_b], list_a[idx_a]
@@ -311,10 +349,12 @@ def score_aware_snake_draft(
                 list_a[idx_a], list_b[idx_b] = list_b[idx_b], list_a[idx_a]
                 if new_diff + 1e-6 < best_diff:
                     best_diff = new_diff
-                    best_pair = (idx_a, idx_b)
+                    candidates = [(idx_a, idx_b)]
+                elif abs(new_diff - best_diff) <= 1e-6 and best_diff + 1e-6 < cur_diff:
+                    candidates.append((idx_a, idx_b))
 
-        if best_pair is not None:
-            ia, ib = best_pair
+        if candidates:
+            ia, ib = rng.choice(candidates) if seed > 0 else candidates[0]
             list_a[ia], list_b[ib] = list_b[ib], list_a[ia]
             improved = True
 
@@ -684,12 +724,13 @@ def get_birthday_message(players_df, bday_col="B-day"):
     return msg, celebrants
 
 
-def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
+def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False, seed=0):
     pd_w = pool_d.copy()
     pf_w = pool_f.copy()
     pre_a, pre_b, logs = [], [], []
     TARGET_D = 8
     MAX_P = 30
+    rng = random.Random(seed)
 
     def extract(nm, pd_p, pf_p):
         k = clean_name_key(nm)
@@ -750,7 +791,9 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
                 srt = sorted(
                     [o1, o2], key=lambda x: x["Score"], reverse=True
                 )
-                if pidx % 2 == 0:
+                # Randomize which team gets the higher-rated rival when shuffling
+                flip_team = rng.choice([True, False]) if seed > 0 else (pidx % 2 == 1)
+                if not flip_team:
                     pre_a.append(srt[0])
                     pre_b.append(srt[1])
                 else:
@@ -804,8 +847,10 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
     pre_f_a = [p for p in pre_a if p["Assigned_Pos"] == "F"]
     pre_f_b = [p for p in pre_b if p["Assigned_Pos"] == "F"]
 
-    da, db = score_aware_snake_draft(sel_d, pre_d_a, pre_d_b)
-    fa, fb = score_aware_snake_draft(sel_f, pre_f_a, pre_f_b)
+    da, db = score_aware_snake_draft(sel_d, pre_d_a, pre_d_b, seed=seed)
+    fa, fb = score_aware_snake_draft(
+        sel_f, pre_f_a, pre_f_b, seed=(seed * 31 + 7 if seed > 0 else 0)
+    )
 
     # If Defense has a residual score skew, allow same-position Forward swaps
     # to offset the overall team score gap while keeping Forward scores tight
@@ -840,14 +885,13 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
             )
             fwd_diff = sum(sa[:min_f_cnt]) - sum(sb[:min_f_cnt])
             total_gap = abs(def_skew + fwd_diff)
-            # Prioritize closing overall team gap while keeping Forward gap small
             return total_gap + 0.35 * abs(fwd_diff)
 
         swapped = True
         while swapped and min_f_cnt > 0:
             swapped = False
             best_loss = fwd_combo_loss(fa_list, fb_list)
-            best_ij = None
+            best_cands = []
             for ia in range(len(fa_list)):
                 for ib in range(len(fb_list)):
                     fa_list[ia], fb_list[ib] = fb_list[ib], fa_list[ia]
@@ -855,9 +899,16 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
                     fa_list[ia], fb_list[ib] = fb_list[ib], fa_list[ia]
                     if cand_loss + 1e-6 < best_loss:
                         best_loss = cand_loss
-                        best_ij = (ia, ib)
-            if best_ij is not None:
-                ia, ib = best_ij
+                        best_cands = [(ia, ib)]
+                    elif (
+                        abs(cand_loss - best_loss) <= 1e-6
+                        and best_loss + 1e-6 < fwd_combo_loss(fa_list, fb_list)
+                    ):
+                        best_cands.append((ia, ib))
+            if best_cands:
+                ia, ib = (
+                    rng.choice(best_cands) if seed > 0 else best_cands[0]
+                )
                 fa_list[ia], fb_list[ib] = fb_list[ib], fa_list[ia]
                 swapped = True
 
@@ -1136,6 +1187,7 @@ if all_sheets is not None:
         )
         is_mon = "monday" in sel_day.strip().lower()
         is_wed = "wednesday" in sel_day.strip().lower()
+        seed = st.session_state.shuffle_seed
 
         w_df = st.session_state.summary_df.copy()
         w_df["1st Choice"] = (
@@ -1223,7 +1275,7 @@ if all_sheets is not None:
                     )
 
         avail = avail.sample(
-            frac=1, random_state=st.session_state.shuffle_seed
+            frac=1, random_state=seed
         ).reset_index(drop=True)
         avail["Status_Rank"] = avail["Reg / Spare"].apply(
             lambda x: 0 if x == "R" else (1 if x == "S" else 2)
@@ -1245,12 +1297,49 @@ if all_sheets is not None:
         MIN_D_TOTAL = 6
         MIN_F_TOTAL = 12
         moved_f_to_d = False
+        moved_d_to_f = False
+
+        def sort_2nd_choice_cands(df_cands, protect_gary=False):
+            c = df_cands.copy()
+            if c.empty:
+                return c
+            if seed > 0:
+                # On shuffle, rotate among eligible Regulars (and Spares after)
+                # while keeping Gary Fera protected at the end on his restricted days
+                c = c.sample(frac=1, random_state=seed)
+                if protect_gary:
+                    c["Is_Gary"] = (
+                        c["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    c = c.sort_values(
+                        by=["Is_Gary", "Status_Rank"],
+                        ascending=[True, True],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+                else:
+                    c = c.sort_values(
+                        by=["Status_Rank"],
+                        ascending=[True],
+                        kind="mergesort",
+                    )
+            else:
+                if protect_gary:
+                    c["Is_Gary"] = (
+                        c["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    c = c.sort_values(
+                        by=["Is_Gary", "Status_Rank", "Score"],
+                        ascending=[True, True, False],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+            return c
 
         # 1. Promote F -> D ONLY if we are genuinely short on Defense AND have enough
         #    Forwards to spare (so we never promote F -> D and demote D -> F on the same day).
         if len(pool_d) < TARGET_D:
             if len(pool_d) < MIN_D_TOTAL:
-                # Below 3 D per team: fill up to 6 D first, and only up to 8 D if F stays >= 12
                 needed_min = MIN_D_TOTAL - len(pool_d)
                 extra_above_min = max(
                     0,
@@ -1261,26 +1350,16 @@ if all_sheets is not None:
                 )
                 needed = needed_min + extra_above_min
             else:
-                # Already have at least 3 D per team (6 or 7 D): only promote F -> D if
-                # Forward lines still have at least 12 Forwards after the move
                 needed = min(
                     TARGET_D - len(pool_d),
                     max(0, len(pool_f) - MIN_F_TOTAL),
                 )
 
             if needed > 0:
-                cands = pool_f[pool_f["2nd Choice"] == "D"].copy()
-                if is_mon and not cands.empty:
-                    cands["Is_Gary"] = (
-                        cands["Full Name"].apply(clean_name_key)
-                        == clean_name_key("Gary Fera")
-                    )
-                    cands = cands.sort_values(
-                        by=["Is_Gary", "Status_Rank", "Score"],
-                        ascending=[True, True, False],
-                        kind="mergesort",
-                    ).drop(columns=["Is_Gary"])
-
+                cands = sort_2nd_choice_cands(
+                    pool_f[pool_f["2nd Choice"] == "D"],
+                    protect_gary=is_mon,
+                )
                 if not cands.empty:
                     conv = cands.head(needed)
                     pool_d = pd.concat([pool_d, conv])
@@ -1296,17 +1375,10 @@ if all_sheets is not None:
         if not moved_f_to_d:
             if len(pool_d) > TARGET_D:
                 excess = len(pool_d) - TARGET_D
-                c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
-                if is_wed and not c_2nd.empty:
-                    c_2nd["Is_Gary"] = (
-                        c_2nd["Full Name"].apply(clean_name_key)
-                        == clean_name_key("Gary Fera")
-                    )
-                    c_2nd = c_2nd.sort_values(
-                        by=["Is_Gary", "Status_Rank", "Score"],
-                        ascending=[True, True, False],
-                        kind="mergesort",
-                    ).drop(columns=["Is_Gary"])
+                c_2nd = sort_2nd_choice_cands(
+                    pool_d[pool_d["2nd Choice"] == "F"],
+                    protect_gary=is_wed,
+                )
                 if len(c_2nd) >= excess:
                     conv = c_2nd.head(excess)
                 else:
@@ -1325,6 +1397,7 @@ if all_sheets is not None:
                     conv = pd.concat([c_2nd, oth.tail(rem)])
                 pool_f = pd.concat([pool_f, conv])
                 pool_d = pool_d.drop(conv.index)
+                moved_d_to_f = True
                 mv = ", ".join(conv["Full Name"])
                 st.info(
                     f"Balanced Defense (capped at 4 per team): Moved "
@@ -1332,17 +1405,10 @@ if all_sheets is not None:
                 )
 
             elif len(pool_d) % 2 == 1 and len(pool_d) > 4:
-                c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
-                if is_wed and not c_2nd.empty:
-                    c_2nd["Is_Gary"] = (
-                        c_2nd["Full Name"].apply(clean_name_key)
-                        == clean_name_key("Gary Fera")
-                    )
-                    c_2nd = c_2nd.sort_values(
-                        by=["Is_Gary", "Status_Rank", "Score"],
-                        ascending=[True, True, False],
-                        kind="mergesort",
-                    ).drop(columns=["Is_Gary"])
+                c_2nd = sort_2nd_choice_cands(
+                    pool_d[pool_d["2nd Choice"] == "F"],
+                    protect_gary=is_wed,
+                )
                 if not c_2nd.empty:
                     conv = c_2nd.head(1)
                 else:
@@ -1360,6 +1426,7 @@ if all_sheets is not None:
                     conv = oth.tail(1)
                 pool_f = pd.concat([pool_f, conv])
                 pool_d = pool_d.drop(conv.index)
+                moved_d_to_f = True
                 mv = ", ".join(conv["Full Name"])
                 d_each = len(pool_d) // 2
                 st.info(
@@ -1374,27 +1441,63 @@ if all_sheets is not None:
                 max_d_to_move = len(pool_d) - MIN_D_TOTAL
                 want_to_move = min(f_shortfall, max_d_to_move)
 
-                c_2nd_f = pool_d[pool_d["2nd Choice"] == "F"].copy()
-                if is_wed and not c_2nd_f.empty:
-                    c_2nd_f["Is_Gary"] = (
-                        c_2nd_f["Full Name"].apply(clean_name_key)
-                        == clean_name_key("Gary Fera")
-                    )
-                    c_2nd_f = c_2nd_f.sort_values(
-                        by=["Is_Gary", "Status_Rank", "Score"],
-                        ascending=[True, True, False],
-                        kind="mergesort",
-                    ).drop(columns=["Is_Gary"])
-
+                c_2nd_f = sort_2nd_choice_cands(
+                    pool_d[pool_d["2nd Choice"] == "F"],
+                    protect_gary=is_wed,
+                )
                 if not c_2nd_f.empty and want_to_move > 0:
                     conv_f = c_2nd_f.head(want_to_move)
                     pool_f = pd.concat([pool_f, conv_f])
                     pool_d = pool_d.drop(conv_f.index)
+                    moved_d_to_f = True
                     mv = ", ".join(conv_f["Full Name"])
                     st.info(
                         f"Filled Forward Lines (min 3 D per team): Moved "
                         f"{len(conv_f)} D -> F: **{mv}**"
                     )
+
+        # 3. On Shuffle (seed > 0), if no forced position imbalance occurred, allow
+        #    two-way D/F players (1st=D, 2nd=F paired with 1st=F, 2nd=D) to rotate
+        #    positions so versatile skaters get mixed between D and F across shuffles!
+        if seed > 0 and not moved_f_to_d and not moved_d_to_f:
+            flex_d = pool_d[pool_d["2nd Choice"] == "F"].copy()
+            flex_f = pool_f[pool_f["2nd Choice"] == "D"].copy()
+            if is_wed and not flex_d.empty:
+                flex_d = flex_d[
+                    flex_d["Full Name"].apply(clean_name_key)
+                    != clean_name_key("Gary Fera")
+                ]
+            if is_mon and not flex_f.empty:
+                flex_f = flex_f[
+                    flex_f["Full Name"].apply(clean_name_key)
+                    != clean_name_key("Gary Fera")
+                ]
+            # Keep Regulars prioritized for active spots
+            flex_d = flex_d[flex_d["Status_Rank"] == 0]
+            flex_f = flex_f[flex_f["Status_Rank"] == 0]
+
+            if not flex_d.empty and not flex_f.empty:
+                rng_pos = random.Random(seed + 101)
+                max_pairs = min(len(flex_d), len(flex_f), 2)
+                num_swap = rng_pos.randint(1, max_pairs)
+                d_to_f = flex_d.sample(
+                    n=num_swap, random_state=seed + 102
+                )
+                f_to_d = flex_f.sample(
+                    n=num_swap, random_state=seed + 103
+                )
+                pool_d = pd.concat(
+                    [pool_d.drop(d_to_f.index), f_to_d]
+                )
+                pool_f = pd.concat(
+                    [pool_f.drop(f_to_d.index), d_to_f]
+                )
+                d_names = ", ".join(d_to_f["Full Name"])
+                f_names = ", ".join(f_to_d["Full Name"])
+                st.info(
+                    f"Rotated Two-Way Skaters: **{d_names}** (D -> F) & "
+                    f"**{f_names}** (F -> D)"
+                )
 
         d_each_str = (
             f"{len(pool_d) // 2} per team"
@@ -1413,7 +1516,7 @@ if all_sheets is not None:
         )
 
         ta, tb, cuts_d, cuts_f, rival_logs = build_rosters(
-            pool_d, pool_f, is_wed, allow_wed_pair=False
+            pool_d, pool_f, is_wed, allow_wed_pair=False, seed=seed
         )
 
         if is_wed:
@@ -1424,7 +1527,11 @@ if all_sheets is not None:
             )
             if gap > 1.5:
                 alt = build_rosters(
-                    pool_d, pool_f, is_wed, allow_wed_pair=True
+                    pool_d,
+                    pool_f,
+                    is_wed,
+                    allow_wed_pair=True,
+                    seed=seed,
                 )
                 ta_a, tb_a, cd_a, cf_a, rl_a = alt
                 a_gap = abs(
