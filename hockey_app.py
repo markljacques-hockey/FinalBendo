@@ -807,6 +807,63 @@ def build_rosters(pool_d, pool_f, is_wed, allow_wed_pair=False):
     da, db = score_aware_snake_draft(sel_d, pre_d_a, pre_d_b)
     fa, fb = score_aware_snake_draft(sel_f, pre_f_a, pre_f_b)
 
+    # If Defense has a residual score skew, allow same-position Forward swaps
+    # to offset the overall team score gap while keeping Forward scores tight
+    def_all_a = sorted(
+        [float(p["Score"]) for p in pre_d_a]
+        + [float(x) for x in da["Score"]],
+        reverse=True,
+    )
+    def_all_b = sorted(
+        [float(p["Score"]) for p in pre_d_b]
+        + [float(x) for x in db["Score"]],
+        reverse=True,
+    )
+    min_d_cnt = min(len(def_all_a), len(def_all_b))
+    def_skew = sum(def_all_a[:min_d_cnt]) - sum(def_all_b[:min_d_cnt])
+
+    if abs(def_skew) > 0.01 and not fa.empty and not fb.empty:
+        fa_list = [fa.iloc[i] for i in range(len(fa))]
+        fb_list = [fb.iloc[i] for i in range(len(fb))]
+        pre_f_sa = [float(p["Score"]) for p in pre_f_a]
+        pre_f_sb = [float(p["Score"]) for p in pre_f_b]
+        min_f_cnt = min(
+            len(pre_f_sa) + len(fa_list), len(pre_f_sb) + len(fb_list)
+        )
+
+        def fwd_combo_loss(la, lb):
+            sa = sorted(
+                pre_f_sa + [float(r["Score"]) for r in la], reverse=True
+            )
+            sb = sorted(
+                pre_f_sb + [float(r["Score"]) for r in lb], reverse=True
+            )
+            fwd_diff = sum(sa[:min_f_cnt]) - sum(sb[:min_f_cnt])
+            total_gap = abs(def_skew + fwd_diff)
+            # Prioritize closing overall team gap while keeping Forward gap small
+            return total_gap + 0.35 * abs(fwd_diff)
+
+        swapped = True
+        while swapped and min_f_cnt > 0:
+            swapped = False
+            best_loss = fwd_combo_loss(fa_list, fb_list)
+            best_ij = None
+            for ia in range(len(fa_list)):
+                for ib in range(len(fb_list)):
+                    fa_list[ia], fb_list[ib] = fb_list[ib], fa_list[ia]
+                    cand_loss = fwd_combo_loss(fa_list, fb_list)
+                    fa_list[ia], fb_list[ib] = fb_list[ib], fa_list[ia]
+                    if cand_loss + 1e-6 < best_loss:
+                        best_loss = cand_loss
+                        best_ij = (ia, ib)
+            if best_ij is not None:
+                ia, ib = best_ij
+                fa_list[ia], fb_list[ib] = fb_list[ib], fa_list[ia]
+                swapped = True
+
+        fa = pd.DataFrame(fa_list, columns=sel_f.columns)
+        fb = pd.DataFrame(fb_list, columns=sel_f.columns)
+
     cols = [
         "Full Name",
         "Position",
@@ -1182,137 +1239,162 @@ if all_sheets is not None:
         pool_oth = avail[
             ~avail["1st Choice"].isin(["D", "F"])
         ].copy()
-
-        if len(pool_d) < TARGET_D:
-            needed = TARGET_D - len(pool_d)
-            cands = pool_f[pool_f["2nd Choice"] == "D"].copy()
-            if is_mon and not cands.empty:
-                cands["Is_Gary"] = (
-                    cands["Full Name"].apply(clean_name_key)
-                    == clean_name_key("Gary Fera")
-                )
-                cands = cands.sort_values(
-                    by=["Is_Gary", "Status_Rank", "Score"],
-                    ascending=[True, True, False],
-                    kind="mergesort",
-                ).drop(columns=["Is_Gary"])
-
-            if not cands.empty:
-                conv = cands.head(needed)
-                pool_d = pd.concat([pool_d, conv])
-                pool_f = pool_f.drop(conv.index)
-                mv = ", ".join(conv["Full Name"])
-                st.info(
-                    f"Balanced Defense (4 per team): Moved "
-                    f"{len(conv)} F -> D: **{mv}**"
-                )
-
-        if len(pool_d) > TARGET_D:
-            excess = len(pool_d) - TARGET_D
-            c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
-            if is_wed and not c_2nd.empty:
-                c_2nd["Is_Gary"] = (
-                    c_2nd["Full Name"].apply(clean_name_key)
-                    == clean_name_key("Gary Fera")
-                )
-                c_2nd = c_2nd.sort_values(
-                    by=["Is_Gary", "Status_Rank", "Score"],
-                    ascending=[True, True, False],
-                    kind="mergesort",
-                ).drop(columns=["Is_Gary"])
-            if len(c_2nd) >= excess:
-                conv = c_2nd.head(excess)
-            else:
-                rem = excess - len(c_2nd)
-                oth = pool_d.drop(c_2nd.index).copy()
-                if is_wed and not oth.empty:
-                    oth["Is_Gary"] = (
-                        oth["Full Name"].apply(clean_name_key)
-                        == clean_name_key("Gary Fera")
-                    )
-                    oth = oth.sort_values(
-                        by=["Is_Gary", "Status_Rank", "Score"],
-                        ascending=[True, True, False],
-                        kind="mergesort",
-                    ).drop(columns=["Is_Gary"])
-                conv = pd.concat([c_2nd, oth.tail(rem)])
-            pool_f = pd.concat([pool_f, conv])
-            pool_d = pool_d.drop(conv.index)
-            mv = ", ".join(conv["Full Name"])
-            st.info(
-                f"Balanced Defense (capped at 4 per team): Moved "
-                f"{len(conv)} D -> F: **{mv}**"
-            )
-
-        elif len(pool_d) % 2 == 1 and len(pool_d) > 4:
-            c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
-            if is_wed and not c_2nd.empty:
-                c_2nd["Is_Gary"] = (
-                    c_2nd["Full Name"].apply(clean_name_key)
-                    == clean_name_key("Gary Fera")
-                )
-                c_2nd = c_2nd.sort_values(
-                    by=["Is_Gary", "Status_Rank", "Score"],
-                    ascending=[True, True, False],
-                    kind="mergesort",
-                ).drop(columns=["Is_Gary"])
-            if not c_2nd.empty:
-                conv = c_2nd.head(1)
-            else:
-                oth = pool_d.copy()
-                if is_wed:
-                    oth["Is_Gary"] = (
-                        oth["Full Name"].apply(clean_name_key)
-                        == clean_name_key("Gary Fera")
-                    )
-                    oth = oth.sort_values(
-                        by=["Is_Gary", "Status_Rank", "Score"],
-                        ascending=[True, True, False],
-                        kind="mergesort",
-                    ).drop(columns=["Is_Gary"])
-                conv = oth.tail(1)
-            pool_f = pd.concat([pool_f, conv])
-            pool_d = pool_d.drop(conv.index)
-            mv = ", ".join(conv["Full Name"])
-            d_each = len(pool_d) // 2
-            st.info(
-                f"Evened Defense ({d_each} per team): Moved "
-                f"1 D -> F: **{mv}**"
-            )
-
         if not pool_oth.empty:
             pool_f = pd.concat([pool_f, pool_oth])
 
-        # Ensure at least 2 Forward lines per team (12 Forwards total) when possible,
-        # without ever dropping below 3 Defensemen per team (6 Defensemen total)
         MIN_D_TOTAL = 6
         MIN_F_TOTAL = 12
-        if len(pool_f) < MIN_F_TOTAL and len(pool_d) > MIN_D_TOTAL:
-            f_shortfall = MIN_F_TOTAL - len(pool_f)
-            max_d_to_move = len(pool_d) - MIN_D_TOTAL
-            want_to_move = min(f_shortfall, max_d_to_move)
+        moved_f_to_d = False
 
-            c_2nd_f = pool_d[pool_d["2nd Choice"] == "F"].copy()
-            if is_wed and not c_2nd_f.empty:
-                c_2nd_f["Is_Gary"] = (
-                    c_2nd_f["Full Name"].apply(clean_name_key)
-                    == clean_name_key("Gary Fera")
+        # 1. Promote F -> D ONLY if we are genuinely short on Defense AND have enough
+        #    Forwards to spare (so we never promote F -> D and demote D -> F on the same day).
+        if len(pool_d) < TARGET_D:
+            if len(pool_d) < MIN_D_TOTAL:
+                # Below 3 D per team: fill up to 6 D first, and only up to 8 D if F stays >= 12
+                needed_min = MIN_D_TOTAL - len(pool_d)
+                extra_above_min = max(
+                    0,
+                    min(
+                        TARGET_D - MIN_D_TOTAL,
+                        len(pool_f) - needed_min - MIN_F_TOTAL,
+                    ),
                 )
-                c_2nd_f = c_2nd_f.sort_values(
-                    by=["Is_Gary", "Status_Rank", "Score"],
-                    ascending=[True, True, False],
-                    kind="mergesort",
-                ).drop(columns=["Is_Gary"])
+                needed = needed_min + extra_above_min
+            else:
+                # Already have at least 3 D per team (6 or 7 D): only promote F -> D if
+                # Forward lines still have at least 12 Forwards after the move
+                needed = min(
+                    TARGET_D - len(pool_d),
+                    max(0, len(pool_f) - MIN_F_TOTAL),
+                )
 
-            if not c_2nd_f.empty and want_to_move > 0:
-                conv_f = c_2nd_f.head(want_to_move)
-                pool_f = pd.concat([pool_f, conv_f])
-                pool_d = pool_d.drop(conv_f.index)
-                mv = ", ".join(conv_f["Full Name"])
+            if needed > 0:
+                cands = pool_f[pool_f["2nd Choice"] == "D"].copy()
+                if is_mon and not cands.empty:
+                    cands["Is_Gary"] = (
+                        cands["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    cands = cands.sort_values(
+                        by=["Is_Gary", "Status_Rank", "Score"],
+                        ascending=[True, True, False],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+
+                if not cands.empty:
+                    conv = cands.head(needed)
+                    pool_d = pd.concat([pool_d, conv])
+                    pool_f = pool_f.drop(conv.index)
+                    moved_f_to_d = True
+                    mv = ", ".join(conv["Full Name"])
+                    st.info(
+                        f"Balanced Defense: Moved "
+                        f"{len(conv)} F -> D: **{mv}**"
+                    )
+
+        # 2. Move D -> F ONLY if no F -> D promotion occurred on this lineup
+        if not moved_f_to_d:
+            if len(pool_d) > TARGET_D:
+                excess = len(pool_d) - TARGET_D
+                c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
+                if is_wed and not c_2nd.empty:
+                    c_2nd["Is_Gary"] = (
+                        c_2nd["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    c_2nd = c_2nd.sort_values(
+                        by=["Is_Gary", "Status_Rank", "Score"],
+                        ascending=[True, True, False],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+                if len(c_2nd) >= excess:
+                    conv = c_2nd.head(excess)
+                else:
+                    rem = excess - len(c_2nd)
+                    oth = pool_d.drop(c_2nd.index).copy()
+                    if is_wed and not oth.empty:
+                        oth["Is_Gary"] = (
+                            oth["Full Name"].apply(clean_name_key)
+                            == clean_name_key("Gary Fera")
+                        )
+                        oth = oth.sort_values(
+                            by=["Is_Gary", "Status_Rank", "Score"],
+                            ascending=[True, True, False],
+                            kind="mergesort",
+                        ).drop(columns=["Is_Gary"])
+                    conv = pd.concat([c_2nd, oth.tail(rem)])
+                pool_f = pd.concat([pool_f, conv])
+                pool_d = pool_d.drop(conv.index)
+                mv = ", ".join(conv["Full Name"])
                 st.info(
-                    f"Filled Forward Lines (min 3 D per team): Moved "
-                    f"{len(conv_f)} D -> F: **{mv}**"
+                    f"Balanced Defense (capped at 4 per team): Moved "
+                    f"{len(conv)} D -> F: **{mv}**"
                 )
+
+            elif len(pool_d) % 2 == 1 and len(pool_d) > 4:
+                c_2nd = pool_d[pool_d["2nd Choice"] == "F"].copy()
+                if is_wed and not c_2nd.empty:
+                    c_2nd["Is_Gary"] = (
+                        c_2nd["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    c_2nd = c_2nd.sort_values(
+                        by=["Is_Gary", "Status_Rank", "Score"],
+                        ascending=[True, True, False],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+                if not c_2nd.empty:
+                    conv = c_2nd.head(1)
+                else:
+                    oth = pool_d.copy()
+                    if is_wed:
+                        oth["Is_Gary"] = (
+                            oth["Full Name"].apply(clean_name_key)
+                            == clean_name_key("Gary Fera")
+                        )
+                        oth = oth.sort_values(
+                            by=["Is_Gary", "Status_Rank", "Score"],
+                            ascending=[True, True, False],
+                            kind="mergesort",
+                        ).drop(columns=["Is_Gary"])
+                    conv = oth.tail(1)
+                pool_f = pd.concat([pool_f, conv])
+                pool_d = pool_d.drop(conv.index)
+                mv = ", ".join(conv["Full Name"])
+                d_each = len(pool_d) // 2
+                st.info(
+                    f"Evened Defense ({d_each} per team): Moved "
+                    f"1 D -> F: **{mv}**"
+                )
+
+            # Ensure at least 2 Forward lines per team (12 Forwards total) when possible,
+            # without ever dropping below 3 Defensemen per team (6 Defensemen total)
+            if len(pool_f) < MIN_F_TOTAL and len(pool_d) > MIN_D_TOTAL:
+                f_shortfall = MIN_F_TOTAL - len(pool_f)
+                max_d_to_move = len(pool_d) - MIN_D_TOTAL
+                want_to_move = min(f_shortfall, max_d_to_move)
+
+                c_2nd_f = pool_d[pool_d["2nd Choice"] == "F"].copy()
+                if is_wed and not c_2nd_f.empty:
+                    c_2nd_f["Is_Gary"] = (
+                        c_2nd_f["Full Name"].apply(clean_name_key)
+                        == clean_name_key("Gary Fera")
+                    )
+                    c_2nd_f = c_2nd_f.sort_values(
+                        by=["Is_Gary", "Status_Rank", "Score"],
+                        ascending=[True, True, False],
+                        kind="mergesort",
+                    ).drop(columns=["Is_Gary"])
+
+                if not c_2nd_f.empty and want_to_move > 0:
+                    conv_f = c_2nd_f.head(want_to_move)
+                    pool_f = pd.concat([pool_f, conv_f])
+                    pool_d = pool_d.drop(conv_f.index)
+                    mv = ", ".join(conv_f["Full Name"])
+                    st.info(
+                        f"Filled Forward Lines (min 3 D per team): Moved "
+                        f"{len(conv_f)} D -> F: **{mv}**"
+                    )
 
         d_each_str = (
             f"{len(pool_d) // 2} per team"
